@@ -7,7 +7,6 @@ import {
   RH_ASSETS_URL,
   DEFAULT_RPC,
   LOG_CHUNK,
-  EXPLORER,
   hexToBigInt,
   toHex,
   decodeApprovalLog,
@@ -20,16 +19,39 @@ import {
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const statePath = path.join(root, "state", "seen.json");
-const UA = "stock-pair-alerts/1.0";
+const UA = "stock-pair-alerts/1.1";
 const truthy = (v) => ["1", "true", "yes", "on"].includes(String(v || "").toLowerCase());
+
+function resolveRpcUrl(raw) {
+  const v = String(raw || "").trim();
+  if (!v) return DEFAULT_RPC;
+  if (/^https?:\/\//i.test(v)) return v;
+  return "https://robinhood-mainnet.g.alchemy.com/v2/" + v;
+}
+
+function fail(err) {
+  const msg = err && err.stack ? err.stack : String(err);
+  console.error(msg);
+  console.error("::error::" + String(err && err.message ? err.message : err));
+  process.exit(1);
+}
 
 async function httpJson(url, opts = {}) {
   const res = await fetch(url, {
     ...opts,
     headers: { "user-agent": UA, accept: "application/json", ...(opts.headers || {}) },
   });
-  if (!res.ok) throw new Error(String(res.status) + " " + url);
-  return res.json();
+  const text = await res.text();
+  let body;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error((opts.method || "GET") + " " + url + " -> " + res.status + " non-json: " + text.slice(0, 120));
+  }
+  if (!res.ok) {
+    throw new Error((opts.method || "GET") + " " + url + " -> " + res.status + " " + text.slice(0, 180));
+  }
+  return body;
 }
 
 async function rpc(url, method, params) {
@@ -38,8 +60,18 @@ async function rpc(url, method, params) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   });
-  if (body.error) throw new Error(method + ": " + (body.error.message || "rpc error"));
+  if (body.error) throw new Error(method + " via " + url + ": " + (body.error.message || "rpc error"));
   return body.result;
+}
+
+async function rpcWithFallback(primary, method, params) {
+  try {
+    return { url: primary, result: await rpc(primary, method, params) };
+  } catch (err) {
+    if (primary === DEFAULT_RPC) throw err;
+    console.warn("primary RPC failed, falling back to public RPC:", err.message);
+    return { url: DEFAULT_RPC, result: await rpc(DEFAULT_RPC, method, params) };
+  }
 }
 
 async function getLogsChunked(rpcUrl, fromBlock, toBlock) {
@@ -68,7 +100,9 @@ async function notify(webhooks, embed) {
       headers: { "content-type": "application/json", "user-agent": UA },
       body: payload,
     });
-    if (![200, 204].includes(res.status)) throw new Error("Discord " + res.status);
+    if (![200, 204].includes(res.status)) {
+      throw new Error("Discord " + res.status + " " + (await res.text()).slice(0, 120));
+    }
   }
 }
 
@@ -81,16 +115,27 @@ function webhooksFromEnv() {
 async function main() {
   const dryRun = truthy(process.env.DRY_RUN);
   const testPing = truthy(process.env.TEST_PING);
-  const rpcUrl = process.env.RPC_URL || DEFAULT_RPC;
+  const rpcUrl = resolveRpcUrl(process.env.RPC_URL);
   const hooks = webhooksFromEnv();
+  console.log(JSON.stringify({
+    node: process.version,
+    rpcHost: rpcUrl.split("/v2/")[0],
+    hasWebhook: hooks.length > 0,
+    dryRun,
+    testPing,
+  }));
 
-  if (testPing && hooks.length && !dryRun) {
-    await notify(hooks, {
-      title: "Watcher alive",
-      description: "stock-pair-alerts poller is running.",
-      color: 0x0984e3,
-      timestamp: new Date().toISOString(),
-    });
+  if (testPing) {
+    if (!hooks.length) throw new Error("test_ping requested but DISCORD_WEBHOOK_URL secret is missing");
+    if (!dryRun) {
+      await notify(hooks, {
+        title: "Watcher alive",
+        description: "stock-pair-alerts poller is running.",
+        color: 0x0984e3,
+        timestamp: new Date().toISOString(),
+      });
+      console.log("Posted watcher-alive ping.");
+    }
   }
 
   let state;
@@ -100,11 +145,12 @@ async function main() {
     state = emptyState();
   }
 
-  const latest = hexToBigInt(await rpc(rpcUrl, "eth_blockNumber", []));
+  const { url: usedRpc, result: latestHex } = await rpcWithFallback(rpcUrl, "eth_blockNumber", []);
+  const latest = hexToBigInt(latestHex);
   let ponsLogs = [];
   if (state.initialized && state.ponsLastBlock) {
     const from = BigInt(state.ponsLastBlock) + 1n;
-    if (from <= latest) ponsLogs = await getLogsChunked(rpcUrl, from, latest);
+    if (from <= latest) ponsLogs = await getLogsChunked(usedRpc, from, latest);
   }
 
   const pons = applyPonsLogs(state, ponsLogs.map(decodeApprovalLog).filter(Boolean));
@@ -132,6 +178,8 @@ async function main() {
 
   if (!dryRun && hooks.length) {
     for (const a of alerts) await notify(hooks, buildEmbed(a));
+  } else if (alerts.length && !hooks.length) {
+    console.warn("alerts ready but DISCORD_WEBHOOK_URL is not set");
   }
 
   await fs.mkdir(path.dirname(statePath), { recursive: true });
@@ -143,6 +191,7 @@ async function main() {
   }, null, 2) + "\n");
 
   console.log(JSON.stringify({
+    usedRpc: usedRpc.split("/v2/")[0],
     dryRun,
     initializedBefore: state.initialized,
     latestBlock: Number(latest),
@@ -152,7 +201,4 @@ async function main() {
   }));
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+main().catch(fail);
