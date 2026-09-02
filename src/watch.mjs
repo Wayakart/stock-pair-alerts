@@ -41,7 +41,7 @@ function fail(err) {
 }
 
 function isRateLimit(err) {
-  return /429|too many|capacity|rate limit|compute units/i.test(String(err && err.message ? err.message : err));
+  return /429|too many|capacity|rate limit|compute units|deadline exceeded|timed out|timeout|ETIMEDOUT|ECONNRESET|502|503|504/i.test(String(err && err.message ? err.message : err));
 }
 
 function isRangeError(err) {
