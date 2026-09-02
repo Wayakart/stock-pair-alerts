@@ -6,11 +6,9 @@ import {
   TOPIC0_APPROVAL,
   LONG_LAUNCHER,
   TOPIC0_LAUNCH,
-  LONG_START_BLOCK,
   RH_ASSETS_URL,
   DEFAULT_RPC,
   LOG_CHUNK,
-  LONG_LOG_CHUNK,
   hexToBigInt,
   toHex,
   decodeApprovalLog,
@@ -237,18 +235,20 @@ async function main() {
 
   const nextRh = extractRhAssets(await httpJson(RH_ASSETS_URL));
 
-  const longFrom = state.longLastBlock
-    ? BigInt(state.longLastBlock) + 1n
-    : BigInt(LONG_START_BLOCK);
   let longReady = Boolean(state.longReady);
-  let longScan = { logs: [], scannedTo: longFrom - 1n, done: longFrom > latest };
-  const longRpc = longReady ? usedRpc : DEFAULT_RPC;
-  if (longFrom <= latest) {
-    longScan = await getLogsBudgeted(longRpc, longFrom, latest, LONG_LAUNCHER, TOPIC0_LAUNCH, {
-      chunk: LONG_LOG_CHUNK,
-      budgetMs: longReady ? 0 : 70_000,
-      minGapMs: longReady ? 200 : 350,
-    });
+  let longScan = { logs: [], scannedTo: -1n, done: true };
+  if (!longReady) {
+    console.warn("long snapshot not ready; skipping Long this run (Pons still watched)");
+  } else {
+    const longFrom = BigInt(state.longLastBlock || 0) + 1n;
+    longScan = { logs: [], scannedTo: longFrom - 1n, done: longFrom > latest };
+    if (longFrom <= latest) {
+      longScan = await getLogsBudgeted(usedRpc, longFrom, latest, LONG_LAUNCHER, TOPIC0_LAUNCH, {
+        chunk: LOG_CHUNK,
+        budgetMs: 45_000,
+        minGapMs: 200,
+      });
+    }
   }
   const longEvents = longScan.logs.map(decodeLaunchLog).filter(Boolean);
   const long = applyLongLogs(state, longEvents, {
@@ -258,7 +258,7 @@ async function main() {
   if (longScan.scannedTo >= 0n && Number(longScan.scannedTo) > long.longLastBlock) {
     long.longLastBlock = Number(longScan.scannedTo);
   }
-  if (longScan.done) longReady = true;
+  if (!state.longReady) longReady = false;
 
   const alerts = [];
   if (state.initialized) {
