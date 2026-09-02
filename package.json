@@ -1,5 +1,12 @@
 {
   "name": "stock-pair-alerts",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "scripts": {
+    "watch": "node src/watch.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
 }
