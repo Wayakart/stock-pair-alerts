@@ -1,8 +1,8 @@
 {
   "initialized": true,
-  "ponsLastBlock": 52795268,
+  "ponsLastBlock": 52894225,
   "ponsApproved": [],
-  "longLastBlock": 52795268,
+  "longLastBlock": 52894225,
   "longNumeraires": [
     "0x0000000000000000000000000000000000000000",
     "0x020bfc650a365f8bb26819deaabf3e21291018b4",
@@ -189,7 +189,23 @@
     "0x08e91b659a545bfb52f1a5e588bf6dc2fa85de7a",
     "0x156e175dd063a8ce274c50654ef40e0032b3fbcf",
     "0xd95b44124e475743a7589e68f3d74008a5536d44",
-    "0x232b8ed6377be97813853b0ac104c4cda8378d1b"
+    "0x232b8ed6377be97813853b0ac104c4cda8378d1b",
+    "0xb039597ed45cba7b6e2fb9e8be51802969cee5be",
+    "0xb853bc83a753342a4f8320ea680b4b1e84118d21",
+    "0xb1bf26c1d20ff267a4f93550d1e0d06ac40a114b",
+    "0x92ef19e82bd8ff36661de838d5eae7e5cef0effe",
+    "0x62200915e7deab1ec7f79fb246dadbb80eacddd0",
+    "0x7dbab44f52c2cb0d2152add95b8f3d7faef9c4f9",
+    "0x1af6446f07eb1d97c546afc8c9544cbdf3ad5137",
+    "0x284358abc07f9359f19f4b5b4ac91901be2597ba",
+    "0x1eebee7f74517e0279dfb09d25b0407beec3fdd6",
+    "0x13c6e185e788a969e336532b8fcf7978bcbc13ac",
+    "0xcbb95bbf36099d34da091dc6fa6f49efa257cee3",
+    "0xc01aa1fecec0605b13bc84874ff7256c0f5f562a",
+    "0xc583c60aef9dc401da72cec1b404743a93cea1cc",
+    "0x8318e4d09faa02217a249bbe9effbbe22f5ec5a0",
+    "0x558378e000d634a36593e338ebacdd6207640efe",
+    "0xec9a28b21032f2376a4ce339f2d2d1b68e28fcd2"
   ],
   "longReady": true
 }
