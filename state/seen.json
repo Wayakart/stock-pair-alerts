@@ -1,8 +1,8 @@
 {
   "initialized": true,
-  "ponsLastBlock": 52758746,
+  "ponsLastBlock": 52795268,
   "ponsApproved": [],
-  "longLastBlock": 52758746,
+  "longLastBlock": 52795268,
   "longNumeraires": [
     "0x0000000000000000000000000000000000000000",
     "0x020bfc650a365f8bb26819deaabf3e21291018b4",
@@ -135,7 +135,7 @@
     "0xb7eaecc89d3e2f9fd597d61726ae824900db8360",
     "0xb90a19ff0af67f7779aff50a882a9cff42446400",
     "0xba0cab75495255d0cb58e22b648bfed4ecd1f47e",
-    "0xbbd09f72b025360fee5c928053dca6248d35be54",
+    "0xbbd09f72b025360fee5c92853dca6248d35be54",
     "0xbc269b6148bb3166286815bc70e994b85d9a6ba6",
     "0xbef75684c43c4ea7bd18dd532a2244674ee8b926",
     "0xc0d6457c16cc70d6790dd43521c899c87ce02f35",
@@ -185,7 +185,11 @@
     "0xfb5b5778d45ae47f15323fb59b666c655174a79c",
     "0xfde6b5d9bb419b10c23268c74e369abff39c0460",
     "0xfe7e19cbce2f896c6c528bc355baf5a768291e18",
-    "0xff080c8ce2e5feadaca0da81314ae59d232d4afd"
+    "0xff080c8ce2e5feadaca0da81314ae59d232d4afd",
+    "0x08e91b659a545bfb52f1a5e588bf6dc2fa85de7a",
+    "0x156e175dd063a8ce274c50654ef40e0032b3fbcf",
+    "0xd95b44124e475743a7589e68f3d74008a5536d44",
+    "0x232b8ed6377be97813853b0ac104c4cda8378d1b"
   ],
   "longReady": true
 }
