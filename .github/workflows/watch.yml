@@ -1,8 +1,10 @@
 name: Watch stock pairs
 
+
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "5,15,25,35,45,55 * * * *"
+
   workflow_dispatch:
     inputs:
       dry_run:
@@ -14,18 +16,20 @@ on:
         type: boolean
         default: false
 
+
 permissions:
   contents: write
+
 
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
       - run: node --test
       - name: Poll
         env:
