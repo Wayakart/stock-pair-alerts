@@ -24,8 +24,9 @@ import {
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const statePath = path.join(root, "state", "seen.json");
-const UA = "stock-pair-alerts/1.2";
+const UA = "stock-pair-alerts/1.3";
 const truthy = (v) => ["1", "true", "yes", "on"].includes(String(v || "").toLowerCase());
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function resolveRpcUrl(raw) {
   const v = String(raw || "").trim();
@@ -39,6 +40,14 @@ function fail(err) {
   console.error(msg);
   console.error("::error::" + String(err && err.message ? err.message : err));
   process.exit(1);
+}
+
+function isRateLimit(err) {
+  return /429|too many|capacity|rate limit|compute units/i.test(String(err && err.message ? err.message : err));
+}
+
+function isRangeError(err) {
+  return /block range|query returned more|too large|response size/i.test(String(err && err.message ? err.message : err));
 }
 
 async function httpJson(url, opts = {}) {
@@ -60,13 +69,34 @@ async function httpJson(url, opts = {}) {
 }
 
 async function rpc(url, method, params) {
-  const body = await httpJson(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-  });
-  if (body.error) throw new Error(method + " via " + url + ": " + (body.error.message || "rpc error"));
-  return body.result;
+  let lastErr;
+  for (let i = 0; i < 6; i++) {
+    try {
+      const body = await httpJson(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      });
+      if (body.error) {
+        const err = new Error(method + " via " + url + ": " + (body.error.message || "rpc error"));
+        if (isRateLimit(err) && i < 5) {
+          lastErr = err;
+          await sleep(400 * 2 ** i);
+          continue;
+        }
+        throw err;
+      }
+      return body.result;
+    } catch (err) {
+      lastErr = err;
+      if (isRateLimit(err) && i < 5) {
+        await sleep(400 * 2 ** i);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
 }
 
 async function rpcWithFallback(primary, method, params) {
@@ -79,19 +109,27 @@ async function rpcWithFallback(primary, method, params) {
   }
 }
 
-async function getLogsBudgeted(rpcUrl, fromBlock, toBlock, address, topic0, { chunk, budgetMs }) {
+async function getLogsBudgeted(rpcUrl, fromBlock, toBlock, address, topic0, { chunk, budgetMs, minGapMs }) {
   const logs = [];
   let start = fromBlock;
   let size = chunk;
+  let url = rpcUrl;
+  let lastCall = 0;
   const t0 = Date.now();
   while (start <= toBlock) {
     if (budgetMs && Date.now() - t0 > budgetMs) {
-      return { logs, scannedTo: start - 1n, done: false };
+      return { logs, scannedTo: start - 1n, done: false, url };
     }
     let end = start + size - 1n;
     if (end > toBlock) end = toBlock;
+    const gap = minGapMs || 0;
+    if (gap) {
+      const wait = lastCall + gap - Date.now();
+      if (wait > 0) await sleep(wait);
+    }
+    lastCall = Date.now();
     try {
-      const chunkLogs = await rpc(rpcUrl, "eth_getLogs", [{
+      const chunkLogs = await rpc(url, "eth_getLogs", [{
         address,
         fromBlock: toHex(start),
         toBlock: toHex(end),
@@ -104,13 +142,25 @@ async function getLogsBudgeted(rpcUrl, fromBlock, toBlock, address, topic0, { ch
         size = grown > chunk ? chunk : grown;
       }
     } catch (err) {
-      if (size <= 1n) throw err;
-      console.warn("getLogs range failed, shrinking", size.toString(), err.message);
-      size = size / 2n;
-      if (size < 1n) size = 1n;
+      if (isRateLimit(err) && url !== DEFAULT_RPC) {
+        console.warn("rate limited, switching Long/Pons logs to public RPC");
+        url = DEFAULT_RPC;
+        continue;
+      }
+      if (isRateLimit(err)) {
+        console.warn("still rate limited, saving progress and stopping this run");
+        return { logs, scannedTo: start - 1n, done: false, url };
+      }
+      if (isRangeError(err) && size > 1n) {
+        console.warn("getLogs range failed, shrinking", size.toString(), err.message);
+        size = size / 2n;
+        if (size < 1n) size = 1n;
+        continue;
+      }
+      throw err;
     }
   }
-  return { logs, scannedTo: toBlock, done: true };
+  return { logs, scannedTo: toBlock, done: true, url };
 }
 
 async function notify(webhooks, embed) {
@@ -176,6 +226,7 @@ async function main() {
       const ponsScan = await getLogsBudgeted(usedRpc, from, latest, PONS_FACTORY, TOPIC0_APPROVAL, {
         chunk: LOG_CHUNK,
         budgetMs: 0,
+        minGapMs: 200,
       });
       ponsLogs = ponsScan.logs;
     }
@@ -191,10 +242,12 @@ async function main() {
     : BigInt(LONG_START_BLOCK);
   let longReady = Boolean(state.longReady);
   let longScan = { logs: [], scannedTo: longFrom - 1n, done: longFrom > latest };
+  const longRpc = longReady ? usedRpc : DEFAULT_RPC;
   if (longFrom <= latest) {
-    longScan = await getLogsBudgeted(usedRpc, longFrom, latest, LONG_LAUNCHER, TOPIC0_LAUNCH, {
+    longScan = await getLogsBudgeted(longRpc, longFrom, latest, LONG_LAUNCHER, TOPIC0_LAUNCH, {
       chunk: LONG_LOG_CHUNK,
       budgetMs: longReady ? 0 : 70_000,
+      minGapMs: longReady ? 200 : 350,
     });
   }
   const longEvents = longScan.logs.map(decodeLaunchLog).filter(Boolean);
