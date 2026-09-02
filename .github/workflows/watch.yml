@@ -1,0 +1,43 @@
+name: Watch stock pairs
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Scan and update state, skip Discord
+        type: boolean
+        default: false
+      test_ping:
+        description: Post a watcher-alive ping
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: node --test
+      - name: Poll
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL_2: ${{ secrets.DISCORD_WEBHOOK_URL_2 }}
+          RPC_URL: ${{ secrets.RPC_URL }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          TEST_PING: ${{ github.event.inputs.test_ping }}
+        run: node src/watch.mjs
+      - name: Commit snapshot
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/seen.json
+          if git diff --staged --quiet; then echo "No state change"; else git commit -m "chore: update seen snapshot" && git push; fi
