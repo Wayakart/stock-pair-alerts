@@ -1,11 +1,19 @@
 export const PONS_FACTORY = "0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e";
 export const TOPIC0_APPROVAL =
   "0x060d1992d069dc524985f328329aae36102a017c59733c5c91fc0691ee0703b6";
+export const LONG_LAUNCHER = "0x22e99278308B393ea1260859B181AD7E78f5eeED";
+export const TOPIC0_LAUNCH =
+  "0xadc6f1f726f7c710f77ec06adc75f3bb964e5be19581b072c67f7b9b4039267b";
+export const LONG_START_BLOCK = 8636038;
 export const RH_ASSETS_URL = "https://api.robinhood.com/rhj/assets";
 export const DEFAULT_RPC = "https://rpc.mainnet.chain.robinhood.com";
 export const EXPLORER = "https://robinhoodchain.blockscout.com";
 export const CHAIN_ID = 4663;
 export const LOG_CHUNK = 2_000n;
+export const LONG_LOG_CHUNK = 100_000n;
+export const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+export const WETH = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
+export const ZERO = "0x0000000000000000000000000000000000000000";
 
 export function normalizeAddr(addr) {
   if (!addr) return "";
@@ -37,6 +45,25 @@ export function decodeApprovalLog(log) {
   };
 }
 
+export function decodeLaunchLog(log) {
+  const topics = log.topics || [];
+  if (topics.length < 4) return null;
+  if (String(topics[0]).toLowerCase() !== TOPIC0_LAUNCH) return null;
+  return {
+    poolOrHook: normalizeAddr("0x" + String(topics[1]).slice(-40)),
+    asset: normalizeAddr("0x" + String(topics[2]).slice(-40)),
+    numeraire: normalizeAddr("0x" + String(topics[3]).slice(-40)),
+    tx: log.transactionHash,
+    block: Number(hexToBigInt(log.blockNumber)),
+  };
+}
+
+export function isStockNumeraire(addr, rhMap) {
+  const a = normalizeAddr(addr);
+  if (!a || a === ZERO || a === USDG || a === WETH) return false;
+  return Boolean(rhMap && rhMap[a]);
+}
+
 export function extractRhAssets(payload) {
   const byAddr = {};
   for (const asset of payload.assets || []) {
@@ -53,14 +80,6 @@ export function extractRhAssets(payload) {
     }
   }
   return byAddr;
-}
-
-export function diffRhAssets(prevMap, nextMap) {
-  const added = [];
-  for (const [addr, meta] of Object.entries(nextMap)) {
-    if (!prevMap[addr]) added.push(meta);
-  }
-  return added;
 }
 
 export function applyPonsLogs(state, events) {
@@ -81,6 +100,26 @@ export function applyPonsLogs(state, events) {
   return {
     ponsApproved: [...approved],
     ponsLastBlock: lastBlock,
+    alerts,
+  };
+}
+
+export function applyLongLogs(state, events, { rhMap, allowAlerts } = {}) {
+  const seen = new Set((state.longNumeraires || []).map(normalizeAddr));
+  let lastBlock = state.longLastBlock || 0;
+  const alerts = [];
+  const sorted = [...events].sort((a, b) => a.block - b.block);
+  for (const e of sorted) {
+    if (e.block > lastBlock) lastBlock = e.block;
+    const addr = normalizeAddr(e.numeraire);
+    if (!addr) continue;
+    const isNew = !seen.has(addr);
+    seen.add(addr);
+    if (isNew && allowAlerts && isStockNumeraire(addr, rhMap)) alerts.push(e);
+  }
+  return {
+    longNumeraires: [...seen],
+    longLastBlock: lastBlock,
     alerts,
   };
 }
@@ -114,6 +153,9 @@ export function emptyState() {
     initialized: false,
     ponsLastBlock: 0,
     ponsApproved: [],
+    longLastBlock: 0,
+    longNumeraires: [],
+    longReady: false,
     rhAssets: {},
   };
 }

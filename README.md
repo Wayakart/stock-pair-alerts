@@ -6,10 +6,10 @@ This is not a new-memecoin bot. 01 / o1 is not watched.
 
 ## What it watches
 
-- Pons: PairTokenApprovalUpdated(approved=true) on 0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e
-- Long.xyz: new active stock on GET https://api.robinhood.com/rhj/assets
+- Pons: `PairTokenApprovalUpdated(approved=true)` on `0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e`
+- Long.xyz: first `LaunchCreated` on LongLauncher `0x22e99278308B393ea1260859B181AD7E78f5eeED` whose `numeraire` is a Robinhood stock token. A Robinhood catalog add is **not** a Long listing. Repeat launches against an already-seen stock are ignored.
 
-Polls every 10 minutes. First run only snapshots, no historical spam.
+Polls every 10 minutes. Seen addresses are stored in `state/seen.json` so Discord does not repeat. First Pons run and the Long historical backfill are silent.
 
 ## Setup
 

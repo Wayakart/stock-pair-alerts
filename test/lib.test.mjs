@@ -2,14 +2,26 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   TOPIC0_APPROVAL,
+  TOPIC0_LAUNCH,
   decodeApprovalLog,
+  decodeLaunchLog,
   extractRhAssets,
-  diffRhAssets,
   applyPonsLogs,
+  applyLongLogs,
+  isStockNumeraire,
   normalizeAddr,
+  USDG,
+  WETH,
+  ZERO,
 } from "../src/lib.mjs";
 
 const nvda = "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC";
+const aapl = "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9";
+
+const rhMap = {
+  [normalizeAddr(nvda)]: { symbol: "NVDA", address: normalizeAddr(nvda) },
+  [normalizeAddr(aapl)]: { symbol: "AAPL", address: normalizeAddr(aapl) },
+};
 
 test("decode PairTokenApprovalUpdated", () => {
   const e = decodeApprovalLog({
@@ -23,15 +35,16 @@ test("decode PairTokenApprovalUpdated", () => {
   assert.equal(e.block, 16);
 });
 
-test("first run is silent", () => {
+test("first Pons run is silent", () => {
   const r = applyPonsLogs(
     { initialized: false, ponsApproved: [], ponsLastBlock: 0 },
     [{ pairToken: normalizeAddr(nvda), approved: true, tx: "0x1", block: 10 }]
   );
   assert.equal(r.alerts.length, 0);
+  assert.equal(r.ponsApproved.length, 1);
 });
 
-test("later run alerts new approvals", () => {
+test("later Pons run alerts new approvals", () => {
   const addr = normalizeAddr(nvda);
   const r = applyPonsLogs(
     { initialized: true, ponsApproved: [addr], ponsLastBlock: 10 },
@@ -43,21 +56,75 @@ test("later run alerts new approvals", () => {
   assert.equal(r.alerts.length, 1);
 });
 
-test("rh catalog diff", () => {
-  const next = extractRhAssets({
-    assets: [
-      {
-        tokenSymbol: "NVDA",
-        status: "ASSET_STATUS_ACTIVE",
-        deployments: [{ contractAddress: nvda, chainId: 4663 }],
-      },
-      {
-        tokenSymbol: "NEW",
-        status: "ASSET_STATUS_ACTIVE",
-        deployments: [{ contractAddress: "0x2222222222222222222222222222222222222222", chainId: 4663 }],
-      },
+test("decode LaunchCreated numeraire", () => {
+  const e = decodeLaunchLog({
+    topics: [
+      TOPIC0_LAUNCH,
+      "0x000000000000000000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "0x000000000000000000000000bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "0x000000000000000000000000" + nvda.slice(2).toLowerCase(),
     ],
+    transactionHash: "0xdef",
+    blockNumber: "0x20",
   });
-  const added = diffRhAssets({ [normalizeAddr(nvda)]: { symbol: "NVDA" } }, next);
-  assert.equal(added[0].symbol, "NEW");
+  assert.equal(e.numeraire, normalizeAddr(nvda));
+  assert.equal(e.block, 32);
+});
+
+test("Long backfill is silent then remembers numeraires", () => {
+  const r = applyLongLogs(
+    { longNumeraires: [], longLastBlock: 0 },
+    [
+      { numeraire: normalizeAddr(nvda), tx: "0x1", block: 10 },
+      { numeraire: normalizeAddr(aapl), tx: "0x2", block: 11 },
+    ],
+    { rhMap, allowAlerts: false }
+  );
+  assert.equal(r.alerts.length, 0);
+  assert.equal(r.longNumeraires.length, 2);
+});
+
+test("Long alerts first new stock numeraire once", () => {
+  const nv = normalizeAddr(nvda);
+  const ap = normalizeAddr(aapl);
+  const r = applyLongLogs(
+    { longNumeraires: [nv], longLastBlock: 10 },
+    [
+      { numeraire: nv, tx: "0x1", block: 11 },
+      { numeraire: ap, tx: "0x2", block: 12 },
+      { numeraire: ap, tx: "0x3", block: 13 },
+    ],
+    { rhMap, allowAlerts: true }
+  );
+  assert.equal(r.alerts.length, 1);
+  assert.equal(r.alerts[0].numeraire, ap);
+  assert.ok(r.longNumeraires.includes(ap));
+});
+
+test("Long does not alert USDG WETH zero or unknown tokens", () => {
+  const r = applyLongLogs(
+    { longNumeraires: [], longLastBlock: 0 },
+    [
+      { numeraire: USDG, tx: "0x1", block: 1 },
+      { numeraire: WETH, tx: "0x2", block: 2 },
+      { numeraire: ZERO, tx: "0x3", block: 3 },
+      { numeraire: "0x1111111111111111111111111111111111111111", tx: "0x4", block: 4 },
+    ],
+    { rhMap, allowAlerts: true }
+  );
+  assert.equal(r.alerts.length, 0);
+  assert.equal(r.longNumeraires.length, 4);
+});
+
+test("isStockNumeraire uses RH catalog lookup", () => {
+  assert.equal(isStockNumeraire(nvda, rhMap), true);
+  assert.equal(isStockNumeraire(USDG, rhMap), false);
+  const next = extractRhAssets({
+    assets: [{
+      tokenSymbol: "NVDA",
+      status: "ASSET_STATUS_ACTIVE",
+      deployments: [{ contractAddress: nvda, chainId: 4663 }],
+    }],
+  });
+  assert.equal(next[normalizeAddr(nvda)].symbol, "NVDA");
 });
