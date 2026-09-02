@@ -13,6 +13,11 @@ import {
   USDG,
   WETH,
   ZERO,
+  logsRpcUrl,
+  parseMaxBlockRange,
+  shrinkLogChunk,
+  growLogChunk,
+  DEFAULT_RPC,
 } from "../src/lib.mjs";
 
 const nvda = "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC";
@@ -127,4 +132,24 @@ test("isStockNumeraire uses RH catalog lookup", () => {
     }],
   });
   assert.equal(next[normalizeAddr(nvda)].symbol, "NVDA");
+});
+
+test("Alchemy free-tier cap is parsed and does not bounce back above 10", () => {
+  const cap = parseMaxBlockRange(new Error("Under the Free tier plan, you can make eth_getLogs requests with up to a 10 block range."));
+  assert.equal(cap, 10n);
+  let size = 14n;
+  let maxSize = 2000n;
+  maxSize = cap;
+  if (size > maxSize) size = maxSize;
+  assert.equal(size, 10n);
+  const shrunk = shrinkLogChunk(14n, 10n);
+  assert.equal(shrunk.size, 7n);
+  assert.equal(shrunk.maxSize, 10n);
+  assert.equal(growLogChunk(shrunk.size, shrunk.maxSize), 10n);
+  assert.equal(growLogChunk(10n, 10n), 10n);
+});
+
+test("logsRpcUrl skips Alchemy for getLogs", () => {
+  assert.equal(logsRpcUrl("https://robinhood-mainnet.g.alchemy.com/v2/KEY", DEFAULT_RPC), DEFAULT_RPC);
+  assert.equal(logsRpcUrl(DEFAULT_RPC, DEFAULT_RPC), DEFAULT_RPC);
 });

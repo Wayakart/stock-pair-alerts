@@ -15,6 +15,32 @@ export const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 export const WETH = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
 export const ZERO = "0x0000000000000000000000000000000000000000";
 
+export function logsRpcUrl(rpcUrl, defaultRpc) {
+  return /alchemy\.com/i.test(String(rpcUrl || "")) ? defaultRpc : rpcUrl;
+}
+
+export function parseMaxBlockRange(err) {
+  const m = String(err && err.message ? err.message : err).match(/up to a (\d+) block range/i);
+  return m ? BigInt(m[1]) : null;
+}
+
+export function shrinkLogChunk(size, maxSize) {
+  let nextMax = size - 1n;
+  if (nextMax < 1n) nextMax = 1n;
+  if (maxSize < nextMax) nextMax = maxSize;
+  let next = size / 2n;
+  if (next > nextMax) next = nextMax;
+  if (next < 1n) next = 1n;
+  return { size: next, maxSize: nextMax };
+}
+
+export function growLogChunk(size, maxSize) {
+  if (size >= maxSize) return size;
+  const grown = size * 2n;
+  return grown > maxSize ? maxSize : grown;
+}
+
+
 export function normalizeAddr(addr) {
   if (!addr) return "";
   const hex = addr.toLowerCase().replace(/^0x/, "");

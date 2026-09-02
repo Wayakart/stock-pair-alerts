@@ -18,6 +18,10 @@ import {
   applyLongLogs,
   buildEmbed,
   emptyState,
+  logsRpcUrl,
+  parseMaxBlockRange,
+  shrinkLogChunk,
+  growLogChunk,
 } from "./lib.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -111,7 +115,11 @@ async function getLogsBudgeted(rpcUrl, fromBlock, toBlock, address, topic0, { ch
   const logs = [];
   let start = fromBlock;
   let size = chunk;
-  let url = rpcUrl;
+  let maxSize = chunk;
+  let url = logsRpcUrl(rpcUrl, DEFAULT_RPC);
+  if (url !== rpcUrl) {
+    console.warn("Alchemy getLogs is capped on free tier; using public RPC for logs");
+  }
   let lastCall = 0;
   const t0 = Date.now();
   while (start <= toBlock) {
@@ -135,13 +143,15 @@ async function getLogsBudgeted(rpcUrl, fromBlock, toBlock, address, topic0, { ch
       }]);
       logs.push(...(chunkLogs || []));
       start = end + 1n;
-      if (size < chunk) {
-        const grown = size * 2n;
-        size = grown > chunk ? chunk : grown;
-      }
+      size = growLogChunk(size, maxSize);
     } catch (err) {
-      if (isRateLimit(err) && url !== DEFAULT_RPC) {
-        console.warn("rate limited, switching Long/Pons logs to public RPC");
+      const cap = parseMaxBlockRange(err);
+      if (cap && cap < maxSize) {
+        maxSize = cap;
+        if (size > maxSize) size = maxSize;
+      }
+      if ((cap || isRateLimit(err)) && url !== DEFAULT_RPC) {
+        console.warn("switching Long/Pons logs to public RPC:", err.message);
         url = DEFAULT_RPC;
         continue;
       }
@@ -151,8 +161,9 @@ async function getLogsBudgeted(rpcUrl, fromBlock, toBlock, address, topic0, { ch
       }
       if (isRangeError(err) && size > 1n) {
         console.warn("getLogs range failed, shrinking", size.toString(), err.message);
-        size = size / 2n;
-        if (size < 1n) size = 1n;
+        const next = shrinkLogChunk(size, maxSize);
+        size = next.size;
+        maxSize = next.maxSize;
         continue;
       }
       throw err;
@@ -237,6 +248,8 @@ async function main() {
 
   let longReady = Boolean(state.longReady);
   let longScan = { logs: [], scannedTo: -1n, done: true };
+  // Historical Long backfill is done offline. Actions only incremental-scans
+  // after state.longReady is true, so the 2-minute job cap cannot kill us.
   if (!longReady) {
     console.warn("long snapshot not ready; skipping Long this run (Pons still watched)");
   } else {
@@ -258,6 +271,7 @@ async function main() {
   if (longScan.scannedTo >= 0n && Number(longScan.scannedTo) > long.longLastBlock) {
     long.longLastBlock = Number(longScan.scannedTo);
   }
+  // longReady is only flipped true by the offline snapshot, never by a skip run.
   if (!state.longReady) longReady = false;
 
   const alerts = [];
