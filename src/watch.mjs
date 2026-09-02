@@ -175,13 +175,23 @@ async function getLogsBudgeted(rpcUrl, fromBlock, toBlock, address, topic0, { ch
 async function notify(webhooks, embed) {
   const payload = JSON.stringify({ username: "stock pair alerts", embeds: [embed] });
   for (const url of webhooks) {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", "user-agent": UA },
-      body: payload,
-    });
-    if (![200, 204].includes(res.status)) {
-      throw new Error("Discord " + res.status + " " + (await res.text()).slice(0, 120));
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "user-agent": UA },
+        body: payload,
+      });
+      if ([200, 204].includes(res.status)) break;
+      const body = await res.text();
+      if (res.status === 429 && attempt < 5) {
+        let wait = 1;
+        try { wait = Number(JSON.parse(body).retry_after) || 1; } catch {}
+        wait = Math.min(Math.max(wait, 0.3), 8);
+        console.warn("Discord 429, retry in", wait, "s");
+        await sleep(wait * 1000 + 150);
+        continue;
+      }
+      throw new Error("Discord " + res.status + " " + body.slice(0, 120));
     }
   }
 }
@@ -266,7 +276,7 @@ async function main() {
   const longEvents = longScan.logs.map(decodeLaunchLog).filter(Boolean);
   const long = applyLongLogs(state, longEvents, {
     rhMap: nextRh,
-    allowAlerts: longReady,
+    allowAlerts: false,
   });
   if (longScan.scannedTo >= 0n && Number(longScan.scannedTo) > long.longLastBlock) {
     long.longLastBlock = Number(longScan.scannedTo);
@@ -296,7 +306,10 @@ async function main() {
   }
 
   if (!dryRun && hooks.length) {
-    for (const a of alerts) await notify(hooks, buildEmbed(a));
+    for (const a of alerts) {
+      try { await notify(hooks, buildEmbed(a)); }
+      catch (err) { console.warn("notify failed, continuing so state still saves:", err.message); }
+    }
   } else if (alerts.length && !hooks.length) {
     console.warn("alerts ready but DISCORD_WEBHOOK_URL is not set");
   }
