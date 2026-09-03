@@ -18,6 +18,8 @@ import {
   shrinkLogChunk,
   growLogChunk,
   DEFAULT_RPC,
+  extractO1Quotes,
+  applyO1Quotes,
 } from "../src/lib.mjs";
 
 const nvda = "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC";
@@ -152,4 +154,43 @@ test("Alchemy free-tier cap is parsed and does not bounce back above 10", () => 
 test("logsRpcUrl skips Alchemy for getLogs", () => {
   assert.equal(logsRpcUrl("https://robinhood-mainnet.g.alchemy.com/v2/KEY", DEFAULT_RPC), DEFAULT_RPC);
   assert.equal(logsRpcUrl(DEFAULT_RPC, DEFAULT_RPC), DEFAULT_RPC);
+});
+
+test("o1 first snapshot is silent", () => {
+  const quotes = extractO1Quotes({
+    quotes: [
+      { address: nvda, symbol: "NVDA", name: "NVIDIA" },
+      { address: aapl, symbol: "AAPL", name: "Apple" },
+    ],
+  });
+  const r = applyO1Quotes({ o1Quotes: [] }, quotes);
+  assert.equal(r.alerts.length, 0);
+  assert.equal(r.o1Quotes.length, 2);
+});
+
+test("o1 later run alerts new quote stocks", () => {
+  const r = applyO1Quotes(
+    { o1Quotes: [normalizeAddr(nvda)] },
+    extractO1Quotes({
+      quotes: [
+        { address: nvda, symbol: "NVDA", name: "NVIDIA" },
+        { address: aapl, symbol: "AAPL", name: "Apple" },
+      ],
+    })
+  );
+  assert.equal(r.alerts.length, 1);
+  assert.equal(r.alerts[0].symbol, "AAPL");
+});
+
+test("o1 extract skips zero USDG WETH", () => {
+  const quotes = extractO1Quotes({
+    quotes: [
+      { address: ZERO, symbol: "ETH" },
+      { address: USDG, symbol: "USDG" },
+      { address: WETH, symbol: "WETH" },
+      { address: nvda, symbol: "NVDA", name: "NVIDIA" },
+    ],
+  });
+  assert.equal(quotes.length, 1);
+  assert.equal(quotes[0].symbol, "NVDA");
 });
