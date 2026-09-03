@@ -1,6 +1,6 @@
 {
   "initialized": true,
-  "ponsLastBlock": 53193928,
+  "ponsLastBlock": 53374138,
   "ponsApproved": [
     "0xf6589f11bc40b669e584073f428b05562f568733",
     "0x4e62068525ab11fe768e29dfd00ef909b9803016",
@@ -11,7 +11,7 @@
     "0x62fd0668e10d8b72339be2dcf7643001688ff13b",
     "0x03dfbbe0ac4e7bcdafd08ed41a400326b77d8c80"
   ],
-  "longLastBlock": 53193928,
+  "longLastBlock": 53374138,
   "longNumeraires": [
     "0x0000000000000000000000000000000000000000",
     "0x020bfc650a365f8bb26819deaabf3e21291018b4",
@@ -284,7 +284,10 @@
     "0xa48f22a46c0f1c46ca7d111cb6c137c271987180",
     "0x93dbb1d2dc5d63f4abacff30485273f538df68ac",
     "0x89776d4cd68193597a2fc132cfac1fde36ccea8a",
-    "0xc93a8c440cea26d7445df01729f193b27965099f"
+    "0xc93a8c440cea26d7445df01729f193b27965099f",
+    "0x4eb576e9c8a24b5fb11dd8eee5e5e2554ade1cf4",
+    "0x85a479651526fbedb482cde88fd3fdd3c1b10970",
+    "0xed12eaf5acbdd9d8e6e99cd89a089b138f6501f7"
   ],
   "longReady": true,
   "o1Quotes": [
