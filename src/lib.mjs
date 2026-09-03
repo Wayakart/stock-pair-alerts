@@ -6,6 +6,7 @@ export const TOPIC0_LAUNCH =
   "0xadc6f1f726f7c710f77ec06adc75f3bb964e5be19581b072c67f7b9b4039267b";
 export const LONG_START_BLOCK = 8636038;
 export const RH_ASSETS_URL = "https://api.robinhood.com/rhj/assets";
+export const O1_CATALOG_URL = "https://docs.o1.exchange/launchpad/reference/robinhood-stock-quotes.json";
 export const DEFAULT_RPC = "https://rpc.mainnet.chain.robinhood.com";
 export const EXPLORER = "https://robinhoodchain.blockscout.com";
 export const CHAIN_ID = 4663;
@@ -108,6 +109,31 @@ export function extractRhAssets(payload) {
   return byAddr;
 }
 
+export function extractO1Quotes(payload) {
+  const out = [];
+  for (const q of payload.quotes || []) {
+    const address = normalizeAddr(q.address);
+    if (!address || address === ZERO || address === USDG || address === WETH) continue;
+    out.push({ address, symbol: q.symbol || "", name: q.name || "" });
+  }
+  return out;
+}
+
+export function applyO1Quotes(state, quotes) {
+  const seen = new Set((state.o1Quotes || []).map(normalizeAddr));
+  const hadSnapshot = seen.size > 0;
+  const alerts = [];
+  for (const q of quotes) {
+    const addr = normalizeAddr(q.address);
+    if (!addr) continue;
+    if (!seen.has(addr)) {
+      if (hadSnapshot) alerts.push(q);
+      seen.add(addr);
+    }
+  }
+  return { o1Quotes: [...seen], alerts };
+}
+
 export function applyPonsLogs(state, events) {
   const approved = new Set((state.ponsApproved || []).map(normalizeAddr));
   let lastBlock = state.ponsLastBlock || 0;
@@ -168,7 +194,7 @@ export function buildEmbed({ platform, symbol, name, address, tx, extra }) {
   return {
     title: platform + " listed " + (symbol || "a new pair stock"),
     url: EXPLORER + "/address/" + address,
-    color: platform === "Pons" ? 0x6c5ce7 : 0x00b894,
+    color: platform === "Pons" ? 0x6c5ce7 : platform === "01" ? 0xf39c12 : 0x00b894,
     fields,
     timestamp: new Date().toISOString(),
   };
@@ -182,6 +208,7 @@ export function emptyState() {
     longLastBlock: 0,
     longNumeraires: [],
     longReady: false,
+    o1Quotes: [],
     rhAssets: {},
   };
 }
