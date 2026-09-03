@@ -22,6 +22,9 @@ import {
   parseMaxBlockRange,
   shrinkLogChunk,
   growLogChunk,
+  O1_CATALOG_URL,
+  extractO1Quotes,
+  applyO1Quotes,
 } from "./lib.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -284,6 +287,14 @@ async function main() {
   // longReady is only flipped true by the offline snapshot, never by a skip run.
   if (!state.longReady) longReady = false;
 
+  let o1Quotes = [];
+  try {
+    o1Quotes = extractO1Quotes(await httpJson(O1_CATALOG_URL));
+  } catch (err) {
+    console.warn("01 catalog fetch failed, skipping 01 this run:", err.message);
+  }
+  const o1 = applyO1Quotes(state, o1Quotes);
+
   const alerts = [];
   if (state.initialized) {
     for (const e of pons.alerts) {
@@ -304,6 +315,15 @@ async function main() {
       });
     }
   }
+  for (const e of o1.alerts) {
+    alerts.push({
+      platform: "01",
+      symbol: e.symbol,
+      name: e.name,
+      address: e.address,
+      extra: "New official 01 quote stock.",
+    });
+  }
 
   if (!dryRun && hooks.length) {
     for (const a of alerts) {
@@ -322,6 +342,7 @@ async function main() {
     longLastBlock: long.longLastBlock,
     longNumeraires: long.longNumeraires,
     longReady,
+    o1Quotes: o1.o1Quotes,
   }, null, 2) + "\n");
 
   console.log(JSON.stringify({
@@ -334,6 +355,7 @@ async function main() {
     longReady,
     longNumeraires: long.longNumeraires.length,
     rhCount: Object.keys(nextRh).length,
+    o1Count: o1.o1Quotes.length,
     posted: dryRun ? 0 : alerts.length,
   }));
 }
