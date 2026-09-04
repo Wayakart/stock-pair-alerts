@@ -1,6 +1,6 @@
 {
   "initialized": true,
-  "ponsLastBlock": 54199295,
+  "ponsLastBlock": 54339199,
   "ponsApproved": [
     "0xf6589f11bc40b669e584073f428b05562f568733",
     "0x4e62068525ab11fe768e29dfd00ef909b9803016",
@@ -11,7 +11,7 @@
     "0x62fd0668e10d8b72339be2dcf7643001688ff13b",
     "0x03dfbbe0ac4e7bcdafd08ed41a400326b77d8c80"
   ],
-  "longLastBlock": 54199295,
+  "longLastBlock": 54339199,
   "longNumeraires": [
     "0x0000000000000000000000000000000000000000",
     "0x020bfc650a365f8bb26819deaabf3e21291018b4",
