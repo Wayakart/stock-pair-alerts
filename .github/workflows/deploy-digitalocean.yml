@@ -32,7 +32,7 @@ jobs:
           rsync -az --delete \
             --exclude '.git' \
             --exclude 'node_modules' \
-            --exclude 'state/seen.json' \
+            --exclude 'state/*.json' \
             --exclude 'state/KILL_SWITCH' \
             -e "ssh -i ~/.ssh/stock_pair_do -o IdentitiesOnly=yes" \
             ./ "root@${{ secrets.DO_HOST }}:/opt/stock-pair-alerts/"
@@ -47,9 +47,11 @@ jobs:
           REQUIRE_QUICKNODE_ROBINHOOD=1
           ALLOW_PUBLIC_ROBINHOOD_RPC=0
           WATCH_PROTOCOLS=pons,long,flap,pair
+          QUICKNODE_MONTHLY_PLAN_USD=249
           SOLANA_RPC_HTTP_URL=${{ secrets.HELIUS_RPC_HTTP_URL }}
           SOLANA_RPC_WS_URL=${{ secrets.HELIUS_RPC_WS_URL }}
           SOLANA_WATCH_PROTOCOLS=pump
+          SOLANA_STREAM_MODE=laserstream-wss
           SOLANA_STOCK_REFRESH_MS=300000
           HELIUS_API_KEY=${{ secrets.HELIUS_API_KEY }}
           HELIUS_PROJECT_ID=${{ secrets.HELIUS_PROJECT_ID }}
@@ -59,6 +61,12 @@ jobs:
           HELIUS_EXTRA_CREDIT_USD_PER_MILLION=5
           WEEKLY_BUDGET_USD=1000
           BUDGET_CHECK_MS=60000
+          HEARTBEAT_MS=60000
+          STALE_CONNECTION_MS=180000
+          DRY_RUN_DECISIONS=1
+          DRY_RUN_MAX_USD=100
+          DRY_RUN_MAX_SLIPPAGE_BPS=500
+          DIGITALOCEAN_MONTHLY_USD=6
           INTERESTING_SYMBOLS=${{ secrets.INTERESTING_SYMBOLS }}
           IGNORE_SYMBOLS=${{ secrets.IGNORE_SYMBOLS }}
           INTERESTING_ADDRESSES=${{ secrets.INTERESTING_ADDRESSES }}

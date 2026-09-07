@@ -14,7 +14,14 @@ This is not a new-memecoin bot. The realtime listener watches onchain protocol e
 - Pair Fund: first `CustomQuotePoolCreated` on the Pair launchpad `0x8660a7f019c7943b0b0a91b8e39aff3b6db6ae62` whose quote asset is a Robinhood stock token. Repeat project/quote/pool combinations are ignored.
 - Pump.fun sentinel: Solana `logsSubscribe` on the Pump program `6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P`. It only fetches transactions with `Instruction: Create`, then alerts if the transaction references a known StonkFun Solana stock quote mint. Pump's public docs currently say new non-SOL quote support is announced but not live beyond native SOL, so this is a future-support detector.
 
-Seen addresses are stored in `state/seen.json` so Discord does not repeat. First Pons run and the Long historical backfill are silent.
+Seen addresses are stored on disk so Discord does not repeat. First Pons run and the Long historical backfill are silent.
+
+The realtime services use separate runtime state files:
+
+- `state/robinhood.json`: Robinhood Chain seen pairs.
+- `state/solana.json`: Solana/Pump seen stock-mint launches.
+- `state/budget.json`: Helius budget telemetry.
+- `state/KILL_SWITCH`: manual or automatic stop file for the Solana budget guard.
 
 ## Realtime setup
 
@@ -39,15 +46,25 @@ Set these Helius values:
 
 - `SOLANA_RPC_HTTP_URL`: `https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY`
 - `SOLANA_RPC_WS_URL`: `wss://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY`
+- `SOLANA_STREAM_MODE=laserstream-wss`: use Helius LaserStream-backed WebSocket subscriptions.
 - `HELIUS_API_KEY`: Helius API key for the Admin API.
 - `HELIUS_PROJECT_ID`: Helius project id used by the Admin API usage endpoint.
 - `REQUIRE_HELIUS_BUDGET_API=1`: fail closed if usage telemetry is not configured.
 - `WEEKLY_BUDGET_USD=1000`: local weekly budget cap.
 - `BUDGET_CHECK_MS=60000`: minimum time between runtime budget checks.
+- `HEARTBEAT_MS=60000`: service heartbeat log interval.
+- `STALE_CONNECTION_MS=180000`: stale WebSocket warning threshold.
+- `DRY_RUN_DECISIONS=1`: log simulated buy decisions before Discord notification.
+- `DRY_RUN_MAX_USD=100`: simulated max buy size.
+- `DRY_RUN_MAX_SLIPPAGE_BPS=500`: simulated max slippage.
+- `QUICKNODE_MONTHLY_PLAN_USD=249`: QuickNode monthly plan assumption used by status projections.
+- `DIGITALOCEAN_MONTHLY_USD=6`: DigitalOcean monthly droplet assumption used by status projections.
 
 The Solana listener writes usage estimates into `state/budget.json`. If the weekly estimate reaches the cap, it writes `state/KILL_SWITCH` and exits with code `2`; while that file exists the listener refuses to restart. Delete the file only after intentionally raising/resetting the budget.
 
 Also set the Helius dashboard Usage autoscaling limit so the account cannot spend past your intended ceiling. The local kill switch can stop this process from making more requests, but it cannot reverse a monthly plan charge or control other API keys using the same Helius account.
+
+Budget warnings are sent at 80%, 90%, and 95% of the weekly cap, once per threshold per budget week.
 
 ### QuickNode Robinhood production setup
 
@@ -87,9 +104,36 @@ Environment variables:
 - `INTERESTING_ADDRESSES`: optional comma-separated token-address allowlist.
 - `IGNORE_ADDRESSES`: optional comma-separated token-address blocklist.
 
-If no allowlist is set, all new stock-token pairs from enabled protocols alert. The listeners store seen addresses in `state/seen.json`, reconnect on WebSocket drops, and refresh asset catalogs periodically.
+If no allowlist is set, all new stock-token pairs from enabled protocols alert. The listeners store seen addresses in their chain-specific state files, reconnect on WebSocket drops, and refresh asset catalogs periodically.
 
 For day-one performance, use a paid Solana RPC provider for `SOLANA_RPC_HTTP_URL` and `SOLANA_RPC_WS_URL`. The Solana listener intentionally does not default to public RPC; `ALLOW_PUBLIC_SOLANA_RPC=1` exists only for local smoke tests.
+
+## Performance operations
+
+Realtime alerts are not the same thing as execution. The app now separates the latency-sensitive detection path from human notifications:
+
+- Provider event received.
+- Protocol-specific decode/classification.
+- Dry-run trading decision logged as `dry_run_decision`.
+- Discord notification sent for human visibility.
+
+Latency traces are logged as structured JSON events named `latency`. Heartbeats are logged as `heartbeat`, and stale WebSocket warnings are logged and sent to Discord.
+
+Run provider benchmarks from the droplet:
+
+```bash
+cd /opt/stock-pair-alerts
+npm run benchmark -- --env /etc/stock-pair-alerts/env --samples 20
+```
+
+The benchmark measures QuickNode Robinhood WebSocket request latency, Helius HTTP RPC latency, and Helius LaserStream WebSocket subscription acknowledgment latency. Use p95/p99 behavior from the actual droplet region to decide whether to move regions or upgrade provider plans.
+
+Run current status and spend projection:
+
+```bash
+cd /opt/stock-pair-alerts
+npm run status -- --env /etc/stock-pair-alerts/env
+```
 
 Additional protocols should be added only after their contract address, event signature, and "new interesting pair" semantics are verified. Pools.trade, Bags.fm, trench.today, hood.fun, Bankr, Virtuals, and Clanker are candidates, but they need protocol-specific confirmation before enabling alerts.
 

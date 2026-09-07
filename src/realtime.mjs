@@ -1,7 +1,7 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import { createDryRunDecisionEngine } from "./decision.mjs";
 import {
   PONS_FACTORY,
   TOPIC0_APPROVAL,
@@ -22,18 +22,24 @@ import {
   applyFlapQuoteLogs,
   applyPairPoolLogs,
   buildEmbed,
+  buildStatusEmbed,
   emptyState,
   csvSet,
   isInterestingAsset,
   normalizeAddr,
   redactUrl,
 } from "./lib.mjs";
+import { createHeartbeat, createLatencyTrace, logJson, msSince } from "./metrics.mjs";
+import { readJsonFile, writeJsonFile } from "./state.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const statePath = path.join(root, "state", "seen.json");
+const legacyStatePath = path.join(root, "state", "seen.json");
+const statePath = path.join(root, "state", "robinhood.json");
 const UA = "stock-pair-alerts/1.4";
 const DEFAULT_WS = "wss://rpc-robinhood.blockmachine.io";
 const RH_REFRESH_MS = Number(process.env.RH_REFRESH_MS || 300_000);
+const HEARTBEAT_MS = Number(process.env.HEARTBEAT_MS || 60_000);
+const STALE_CONNECTION_MS = Number(process.env.STALE_CONNECTION_MS || 180_000);
 
 const protocols = [
   {
@@ -147,16 +153,13 @@ async function notify(webhooks, embed) {
 }
 
 async function readState() {
-  try {
-    return { ...emptyState(), ...JSON.parse(await fs.readFile(statePath, "utf8")) };
-  } catch {
-    return emptyState();
-  }
+  const direct = await readJsonFile(statePath, null);
+  if (direct) return { ...emptyState(), ...direct };
+  return { ...emptyState(), ...(await readJsonFile(legacyStatePath, {})) };
 }
 
 async function writeState(state) {
-  await fs.mkdir(path.dirname(statePath), { recursive: true });
-  await fs.writeFile(statePath, JSON.stringify(state, null, 2) + "\n");
+  await writeJsonFile(statePath, state);
 }
 
 async function loadRhAssets() {
@@ -187,9 +190,10 @@ function routeKey(address, topic0) {
   return normalizeAddr(address) + ":" + String(topic0 || "").toLowerCase();
 }
 
-async function handlePonsLog({ state, log, rhCache, hooks }) {
+async function handlePonsLog({ state, log, rhCache, hooks, decisionEngine, trace, heartbeat }) {
   const event = decodeApprovalLog(log);
   if (!event) return state;
+  trace.mark("decoded", { platform: "Pons", block: event.block });
   const next = { ...state, initialized: true };
   const pons = applyPonsLogs(next, [event]);
   next.ponsLastBlock = pons.ponsLastBlock;
@@ -205,13 +209,16 @@ async function handlePonsLog({ state, log, rhCache, hooks }) {
   if (!alertAllowed(meta, event.pairToken)) return next;
 
   const alert = { platform: "Pons", symbol: meta.symbol, name: meta.name, address: event.pairToken, tx: event.tx };
-  await postOrLogAlert(hooks, alert);
+  await decisionEngine.evaluate(alert, { receivedToDecisionMs: trace.elapsedMs() });
+  if (await postOrLogAlert(hooks, alert)) heartbeat?.alert();
+  trace.mark("alert_sent");
   return next;
 }
 
-async function handleLongLog({ state, log, rhCache, hooks }) {
+async function handleLongLog({ state, log, rhCache, hooks, decisionEngine, trace, heartbeat }) {
   const event = decodeLaunchLog(log);
   if (!event) return state;
+  trace.mark("decoded", { platform: "Long", block: event.block });
   let rhMap = await rhCache.get();
   let long = applyLongLogs(state, [event], { rhMap, allowAlerts: true });
   if (!long.alerts.length) {
@@ -239,13 +246,16 @@ async function handleLongLog({ state, log, rhCache, hooks }) {
     tx: event.tx,
     extra: "First Long pair against this stock.",
   };
-  await postOrLogAlert(hooks, alert);
+  await decisionEngine.evaluate(alert, { receivedToDecisionMs: trace.elapsedMs() });
+  if (await postOrLogAlert(hooks, alert)) heartbeat?.alert();
+  trace.mark("alert_sent");
   return next;
 }
 
-async function handleFlapLog({ state, log, rhCache, hooks }) {
+async function handleFlapLog({ state, log, rhCache, hooks, decisionEngine, trace, heartbeat }) {
   const event = decodeFlapQuoteSetLog(log);
   if (!event) return state;
+  trace.mark("decoded", { platform: "Flap", block: event.block });
   let rhMap = await rhCache.get();
   let flap = applyFlapQuoteLogs(state, [event], { rhMap, allowAlerts: true });
   if (!flap.alerts.length) {
@@ -272,13 +282,16 @@ async function handleFlapLog({ state, log, rhCache, hooks }) {
     tx: event.tx,
     extra: "Flap token configured a Robinhood stock quote pair. Token: `" + event.token + "`",
   };
-  await postOrLogAlert(hooks, alert);
+  await decisionEngine.evaluate(alert, { receivedToDecisionMs: trace.elapsedMs() });
+  if (await postOrLogAlert(hooks, alert)) heartbeat?.alert();
+  trace.mark("alert_sent");
   return next;
 }
 
-async function handlePairLog({ state, log, rhCache, hooks }) {
+async function handlePairLog({ state, log, rhCache, hooks, decisionEngine, trace, heartbeat }) {
   const event = decodePairCustomQuotePoolLog(log);
   if (!event) return state;
+  trace.mark("decoded", { platform: "Pair", block: event.block });
   let rhMap = await rhCache.get();
   let pair = applyPairPoolLogs(state, [event], { rhMap, allowAlerts: true });
   if (!pair.alerts.length) {
@@ -305,7 +318,9 @@ async function handlePairLog({ state, log, rhCache, hooks }) {
     tx: event.tx,
     extra: "Pair Fund launched a custom Robinhood stock quote pool. Project: `" + event.project + "`",
   };
-  await postOrLogAlert(hooks, alert);
+  await decisionEngine.evaluate(alert, { receivedToDecisionMs: trace.elapsedMs() });
+  if (await postOrLogAlert(hooks, alert)) heartbeat?.alert();
+  trace.mark("alert_sent");
   return next;
 }
 
@@ -313,16 +328,29 @@ async function postOrLogAlert(hooks, alert) {
   console.log(JSON.stringify({ alert }));
   if (!hooks.length) {
     console.warn("alert ready but DISCORD_WEBHOOK_URL is not set");
-    return;
+    return false;
   }
   try {
     await notify(hooks, buildEmbed(alert));
+    return true;
   } catch (err) {
     console.warn("notify failed:", err.message);
+    return false;
   }
 }
 
-async function runConnection({ url, rhCache, hooks }) {
+async function postStatusAlert(hooks, status) {
+  if (!hooks.length) return false;
+  try {
+    await notify(hooks, buildStatusEmbed(status));
+    return true;
+  } catch (err) {
+    console.warn("status notify failed:", err.message);
+    return false;
+  }
+}
+
+async function runConnection({ url, rhCache, hooks, heartbeat, decisionEngine }) {
   let state = await readState();
   let nextId = 1;
   const byLogKey = new Map();
@@ -332,27 +360,37 @@ async function runConnection({ url, rhCache, hooks }) {
   for (const protocol of active) byLogKey.set(routeKey(protocol.address, protocol.topic0), protocol);
 
   await rhCache.get();
-  console.log(JSON.stringify({
+  logJson("listener_start", {
     mode: "realtime",
     url: redactUrl(url),
     protocols: active.map((p) => p.id),
     hasWebhook: hooks.length > 0,
     interestingSymbols: [...includeSymbols],
     ignoreSymbols: [...excludeSymbols],
-  }));
+    statePath,
+  });
 
   await new Promise((resolve, reject) => {
     const ws = new WebSocket(url, { handshakeTimeout: 10_000 });
     let settled = false;
+    const heartbeatTimer = setInterval(() => {
+      void heartbeat.tick().catch((err) => console.warn("heartbeat failed:", err.message));
+    }, HEARTBEAT_MS).unref();
+    const pingTimer = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.ping();
+    }, 60_000).unref();
 
     function finish(err) {
       if (settled) return;
       settled = true;
+      clearInterval(heartbeatTimer);
+      clearInterval(pingTimer);
       try { ws.close(); } catch {}
       err ? reject(err) : resolve();
     }
 
     ws.on("open", () => {
+      void heartbeat.tick({ force: true }).catch((err) => console.warn("heartbeat failed:", err.message));
       const id = nextId++;
       pendingById.set(id, { id: "robinhood-logs" });
       ws.send(JSON.stringify({
@@ -367,6 +405,9 @@ async function runConnection({ url, rhCache, hooks }) {
     });
 
     ws.on("message", async (data) => {
+      heartbeat.message();
+      const receivedNs = process.hrtime.bigint();
+      let trace = null;
       try {
         const msg = JSON.parse(String(data));
         if (msg.id && msg.result) {
@@ -380,12 +421,24 @@ async function runConnection({ url, rhCache, hooks }) {
         const log = msg.params.result;
         const protocol = byLogKey.get(routeKey(log.address, log.topics?.[0]));
         if (!protocol) return;
-        if (protocol.id === "pons") state = await handlePonsLog({ state, log, rhCache, hooks });
-        if (protocol.id === "long") state = await handleLongLog({ state, log, rhCache, hooks });
-        if (protocol.id === "flap") state = await handleFlapLog({ state, log, rhCache, hooks });
-        if (protocol.id === "pair") state = await handlePairLog({ state, log, rhCache, hooks });
+        heartbeat.event();
+        trace = createLatencyTrace({
+          chain: "robinhood",
+          platform: protocol.platform,
+          tx: log.transactionHash,
+          block: Number(log.blockNumber || 0),
+        });
+        trace.mark("received", { providerToHandlerMs: Number(msSince(receivedNs).toFixed(3)) });
+        if (protocol.id === "pons") state = await handlePonsLog({ state, log, rhCache, hooks, decisionEngine, trace, heartbeat });
+        if (protocol.id === "long") state = await handleLongLog({ state, log, rhCache, hooks, decisionEngine, trace, heartbeat });
+        if (protocol.id === "flap") state = await handleFlapLog({ state, log, rhCache, hooks, decisionEngine, trace, heartbeat });
+        if (protocol.id === "pair") state = await handlePairLog({ state, log, rhCache, hooks, decisionEngine, trace, heartbeat });
         await writeState(state);
+        trace.done("handled");
+        await heartbeat.tick();
       } catch (err) {
+        heartbeat.error();
+        if (trace) trace.done("error", { error: err.message });
         console.warn("message handling failed:", err.stack || err.message);
       }
     });
@@ -403,10 +456,26 @@ async function main() {
   const url = wsUrlFromEnv();
   const hooks = webhooksFromEnv();
   const rhCache = makeRhCache();
+  const heartbeat = createHeartbeat({
+    service: "robinhood",
+    intervalMs: HEARTBEAT_MS,
+    staleMs: STALE_CONNECTION_MS,
+    onStale: ({ lastMessageAgeMs, staleMs }) => postStatusAlert(hooks, {
+      title: "Robinhood listener stale",
+      level: "warn",
+      service: "robinhood",
+      message: "No WebSocket messages observed within the stale threshold.",
+      fields: [
+        { name: "Last message age ms", value: String(lastMessageAgeMs), inline: true },
+        { name: "Threshold ms", value: String(staleMs), inline: true },
+      ],
+    }),
+  });
+  const decisionEngine = createDryRunDecisionEngine();
   let attempt = 0;
   for (;;) {
     try {
-      await runConnection({ url, rhCache, hooks });
+      await runConnection({ url, rhCache, hooks, heartbeat, decisionEngine });
       attempt += 1;
     } catch (err) {
       attempt += 1;
