@@ -6,7 +6,7 @@ on:
       restart_services:
         description: Restart realtime services after deploy
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: read
@@ -69,6 +69,7 @@ jobs:
           DRY_RUN_MAX_USD=100
           DRY_RUN_MAX_SLIPPAGE_BPS=500
           DIGITALOCEAN_MONTHLY_USD=${{ vars.DIGITALOCEAN_MONTHLY_USD || '6' }}
+          DIGITALOCEAN_MONTHLY_HARD_CAP_USD=${{ vars.DIGITALOCEAN_MONTHLY_HARD_CAP_USD || '6' }}
           INTERESTING_SYMBOLS=${{ secrets.INTERESTING_SYMBOLS }}
           IGNORE_SYMBOLS=${{ secrets.IGNORE_SYMBOLS }}
           INTERESTING_ADDRESSES=${{ secrets.INTERESTING_ADDRESSES }}
@@ -106,6 +107,7 @@ jobs:
           ExecStart=/usr/bin/npm run realtime
           Restart=always
           RestartSec=2
+          RestartPreventExitStatus=2
           StateDirectory=stock-pair-alerts
           LogsDirectory=stock-pair-alerts
           NoNewPrivileges=true

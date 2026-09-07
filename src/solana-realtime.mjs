@@ -12,6 +12,7 @@ import {
   buildDiscordAlertPayload,
   buildStatusEmbed,
   csvSet,
+  uniqueWebhookUrls,
   decodePumpCreateEvent,
   emptyState,
   extractStonkfunStockPairs,
@@ -25,8 +26,8 @@ import { readJsonFile, writeJsonFile } from "./state.mjs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const legacyStatePath = path.join(root, "state", "seen.json");
 const statePath = path.join(root, "state", "solana.json");
-const budgetStatePath = path.join(root, "state", "budget.json");
-const killSwitchPath = path.join(root, "state", "KILL_SWITCH");
+const budgetStatePath = path.resolve(process.env.BUDGET_STATE_PATH || path.join(root, "state", "budget.json"));
+const killSwitchPath = path.resolve(process.env.KILL_SWITCH_PATH || path.join(root, "state", "KILL_SWITCH"));
 const UA = "stock-pair-alerts/1.6";
 const DEFAULT_SOLANA_RPC_HTTP = "https://api.mainnet-beta.solana.com";
 const DEFAULT_SOLANA_RPC_WS = "wss://api.mainnet-beta.solana.com";
@@ -83,9 +84,7 @@ function laserstreamConfigFromEnv() {
 }
 
 function webhooksFromEnv() {
-  return [process.env.DISCORD_WEBHOOK_URL, process.env.DISCORD_WEBHOOK_URL_2].filter(
-    (url) => url && url.startsWith("https://")
-  );
+  return uniqueWebhookUrls([process.env.DISCORD_WEBHOOK_URL, process.env.DISCORD_WEBHOOK_URL_2]);
 }
 
 async function readState() {

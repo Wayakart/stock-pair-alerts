@@ -40,6 +40,7 @@ import {
   extractO1Quotes,
   applyO1Quotes,
   csvSet,
+  uniqueWebhookUrls,
   isInterestingAsset,
   isInterestingSolanaAsset,
   PUMP_PROGRAM,
@@ -511,6 +512,15 @@ test("o1 extract skips zero USDG WETH", () => {
 test("csvSet normalizes comma-separated values", () => {
   assert.deepEqual([...csvSet(" NVDA, tsla ,, ")], ["nvda", "tsla"]);
   assert.deepEqual([...csvSet(" nvda, tsla ", { normalize: (v) => v.toUpperCase() })], ["NVDA", "TSLA"]);
+});
+
+test("uniqueWebhookUrls removes duplicate Discord destinations", () => {
+  assert.deepEqual(uniqueWebhookUrls([
+    "https://discord.com/api/webhooks/1/token/",
+    " https://discord.com/api/webhooks/1/token ",
+    "http://discord.com/api/webhooks/2/token",
+    "",
+  ]), ["https://discord.com/api/webhooks/1/token"]);
 });
 
 test("isInterestingAsset supports symbol and address allowlists", () => {

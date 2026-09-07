@@ -80,6 +80,29 @@ test("budget guard writes kill switch at the weekly cap", async () => {
   assert.match(killSwitch, /budget exceeded/);
 });
 
+test("budget guard writes kill switch above the DigitalOcean configuration cap", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "stock-pair-alerts-budget-"));
+  const statePath = path.join(dir, "budget.json");
+  const killSwitchPath = path.join(dir, "KILL_SWITCH");
+
+  await withEnv({
+    WEEKLY_BUDGET_USD: "1000",
+    HELIUS_MONTHLY_PLAN_USD: "0",
+    QUICKNODE_MONTHLY_PLAN_USD: "0",
+    DIGITALOCEAN_MONTHLY_USD: "7",
+    DIGITALOCEAN_MONTHLY_HARD_CAP_USD: "6",
+    HELIUS_API_KEY: "",
+    HELIUS_PROJECT_ID: "",
+    REQUIRE_HELIUS_BUDGET_API: "",
+  }, async () => {
+    const guard = await createBudgetGuard({ statePath, killSwitchPath });
+    await assert.rejects(() => guard.check(), /provider hard cap exceeded: DigitalOcean/);
+  });
+
+  const killSwitch = await fs.readFile(killSwitchPath, "utf8");
+  assert.match(killSwitch, /DigitalOcean provider hard cap exceeded/);
+});
+
 test("budget guard refuses to start when manual kill switch exists", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "stock-pair-alerts-budget-"));
   const statePath = path.join(dir, "seen.json");
@@ -121,5 +144,6 @@ test("budget guard reports warning thresholds once", async () => {
 test("isBudgetStopError recognizes fatal budget stops", () => {
   assert.equal(isBudgetStopError(new Error("weekly budget exceeded: $1000")), true);
   assert.equal(isBudgetStopError(new Error("kill switch active: state/KILL_SWITCH")), true);
+  assert.equal(isBudgetStopError(new Error("provider hard cap exceeded: DigitalOcean $7 > $6")), true);
   assert.equal(isBudgetStopError(new Error("temporary websocket close")), false);
 });

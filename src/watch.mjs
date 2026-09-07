@@ -26,6 +26,7 @@ import {
   O1_CATALOG_URL,
   extractO1Quotes,
   applyO1Quotes,
+  uniqueWebhookUrls,
 } from "./lib.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -209,9 +210,7 @@ async function tokenMetadata(rpcUrl, address) {
 }
 
 function webhooksFromEnv() {
-  return [process.env.DISCORD_WEBHOOK_URL, process.env.DISCORD_WEBHOOK_URL_2].filter(
-    (u) => u && u.startsWith("https://")
-  );
+  return uniqueWebhookUrls([process.env.DISCORD_WEBHOOK_URL, process.env.DISCORD_WEBHOOK_URL_2]);
 }
 
 async function main() {

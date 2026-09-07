@@ -191,6 +191,18 @@ export function csvSet(raw, { normalize = (v) => v.toLowerCase() } = {}) {
   );
 }
 
+export function uniqueWebhookUrls(values) {
+  const seen = new Set();
+  const urls = [];
+  for (const value of values) {
+    const url = String(value || "").trim().replace(/\/+$/, "");
+    if (!url.startsWith("https://") || seen.has(url)) continue;
+    seen.add(url);
+    urls.push(url);
+  }
+  return urls;
+}
+
 export function isInterestingAsset({ address, symbol }, {
   includeSymbols = new Set(),
   excludeSymbols = new Set(),

@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { readJsonFile, writeJsonFile } from "./state.mjs";
 
 const DEFAULT_WEEKLY_BUDGET_USD = 1000;
 const DEFAULT_PLAN_USD = 499;
@@ -20,17 +21,9 @@ function boolEnv(name) {
   return ["1", "true", "yes"].includes(String(process.env[name] || "").toLowerCase());
 }
 
-async function readJson(file, fallback) {
-  try {
-    return JSON.parse(await fs.readFile(file, "utf8"));
-  } catch {
-    return fallback;
-  }
-}
-
-async function writeJson(file, value) {
+async function writeKillSwitch(file, reason) {
   await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, JSON.stringify(value, null, 2) + "\n");
+  await fs.writeFile(file, reason + "\n");
 }
 
 async function killSwitchActive(file) {
@@ -44,7 +37,7 @@ async function killSwitchActive(file) {
 }
 
 export function isBudgetStopError(err) {
-  return /kill switch active|weekly budget exceeded/i.test(String(err?.message || err));
+  return /kill switch active|weekly budget exceeded|provider hard cap exceeded/i.test(String(err?.message || err));
 }
 
 export function estimateHeliusUsd(usage, {
@@ -87,6 +80,10 @@ export async function createBudgetGuard({ statePath, killSwitchPath, now = () =>
   );
   const quicknodeMonthlyUsd = numEnv("QUICKNODE_MONTHLY_PLAN_USD", 0);
   const digitalOceanMonthlyUsd = numEnv("DIGITALOCEAN_MONTHLY_USD", 0);
+  const digitalOceanMonthlyHardCapUsd = numEnv(
+    "DIGITALOCEAN_MONTHLY_HARD_CAP_USD",
+    digitalOceanMonthlyUsd
+  );
   const requireHeliusBudgetApi = boolEnv("REQUIRE_HELIUS_BUDGET_API");
   const apiKey = process.env.HELIUS_API_KEY;
   const projectId = process.env.HELIUS_PROJECT_ID;
@@ -99,8 +96,16 @@ export async function createBudgetGuard({ statePath, killSwitchPath, now = () =>
       if (await killSwitchActive(killSwitchPath)) {
         throw new Error("kill switch active: " + killSwitchPath);
       }
+      if (digitalOceanMonthlyUsd > digitalOceanMonthlyHardCapUsd) {
+        const checkedAt = new Date(now()).toISOString();
+        await writeKillSwitch(killSwitchPath, "DigitalOcean provider hard cap exceeded at " + checkedAt);
+        throw new Error(
+          "provider hard cap exceeded: DigitalOcean $" + digitalOceanMonthlyUsd.toFixed(2)
+          + " > $" + digitalOceanMonthlyHardCapUsd.toFixed(2)
+        );
+      }
 
-      const state = await readJson(statePath, {});
+      const state = await readJsonFile(statePath, {});
       const budget = state.budget || {};
       const startedAt = budget.weekStartedAt || new Date(now()).toISOString();
       const startedMs = Date.parse(startedAt);
@@ -134,6 +139,7 @@ export async function createBudgetGuard({ statePath, killSwitchPath, now = () =>
       nextBudget.heliusEstimatedUsd = heliusUsd;
       nextBudget.quicknodeEstimatedUsd = quicknodeMonthlyUsd;
       nextBudget.digitalOceanEstimatedUsd = digitalOceanMonthlyUsd;
+      nextBudget.digitalOceanMonthlyHardCapUsd = digitalOceanMonthlyHardCapUsd;
       nextBudget.fixedProviderUsd = fixedProviderUsd;
       nextBudget.localUsdSpent = localUsdSpent;
       nextBudget.estimatedUsd = estimatedUsd;
@@ -142,10 +148,10 @@ export async function createBudgetGuard({ statePath, killSwitchPath, now = () =>
       nextBudget.heliusCreditsRemaining = heliusUsage?.creditsRemaining;
       nextBudget.warnedThresholds = [...warnedThresholds];
       state.budget = nextBudget;
-      await writeJson(statePath, state);
+      await writeJsonFile(statePath, state);
 
       if (estimatedUsd >= budgetUsd) {
-        await fs.writeFile(killSwitchPath, "budget exceeded at " + nextBudget.lastCheckedAt + "\n");
+        await writeKillSwitch(killSwitchPath, "budget exceeded at " + nextBudget.lastCheckedAt);
         throw new Error("weekly budget exceeded: $" + estimatedUsd.toFixed(2) + " >= $" + budgetUsd.toFixed(2));
       }
 

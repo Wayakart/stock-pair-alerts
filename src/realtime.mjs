@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import { createBudgetGuard, isBudgetStopError } from "./budget.mjs";
 import { createDryRunDecisionEngine } from "./decision.mjs";
 import {
   PONS_FACTORY,
@@ -27,22 +28,26 @@ import {
   buildStatusEmbed,
   emptyState,
   csvSet,
+  uniqueWebhookUrls,
   isInterestingAsset,
   normalizeAddr,
   redactUrl,
   hexToBigInt,
   toHex,
 } from "./lib.mjs";
-import { createHeartbeat, createLatencyTrace, logJson, msSince } from "./metrics.mjs";
+import { createHeartbeat, createLatencyTrace, logJson, msSince, warnJson } from "./metrics.mjs";
 import { readJsonFile, writeJsonFile } from "./state.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const legacyStatePath = path.join(root, "state", "seen.json");
 const statePath = path.join(root, "state", "robinhood.json");
+const budgetStatePath = path.resolve(process.env.BUDGET_STATE_PATH || path.join(root, "state", "budget.json"));
+const killSwitchPath = path.resolve(process.env.KILL_SWITCH_PATH || path.join(root, "state", "KILL_SWITCH"));
 const UA = "stock-pair-alerts/1.6";
 const DEFAULT_WS = "wss://rpc-robinhood.blockmachine.io";
 const RH_REFRESH_MS = Number(process.env.RH_REFRESH_MS || 300_000);
 const HEARTBEAT_MS = Number(process.env.HEARTBEAT_MS || 60_000);
+const BUDGET_CHECK_MS = Number(process.env.BUDGET_CHECK_MS || 60_000);
 const STALE_CONNECTION_MS = Number(process.env.STALE_CONNECTION_MS || 180_000);
 const BACKFILL_CHUNK = BigInt(process.env.EVM_BACKFILL_CHUNK || 2_000);
 const BACKFILL_OVERLAP_BLOCKS = BigInt(process.env.EVM_BACKFILL_OVERLAP_BLOCKS || 32);
@@ -121,9 +126,18 @@ function httpUrlFromEnv(wsUrl) {
 }
 
 function webhooksFromEnv() {
-  return [process.env.DISCORD_WEBHOOK_URL, process.env.DISCORD_WEBHOOK_URL_2].filter(
-    (url) => url && url.startsWith("https://")
-  );
+  return uniqueWebhookUrls([process.env.DISCORD_WEBHOOK_URL, process.env.DISCORD_WEBHOOK_URL_2]);
+}
+
+function makeBudgetChecker(budgetGuard) {
+  let lastChecked = 0;
+  return async ({ force = false } = {}) => {
+    const now = Date.now();
+    if (!force && now - lastChecked < BUDGET_CHECK_MS) return null;
+    const result = await budgetGuard.check({ force });
+    lastChecked = now;
+    return result;
+  };
 }
 
 async function httpJson(url, opts = {}) {
@@ -521,7 +535,27 @@ async function postStatusAlert(hooks, status) {
   }
 }
 
-async function runConnection({ url, httpUrl, rhCache, tokenCache, hooks, heartbeat, decisionEngine, rickAutoScan }) {
+async function checkBudgetAndWarn(checkBudget, hooks) {
+  const budget = await checkBudget();
+  if (!budget?.crossedThreshold) return budget;
+  warnJson("budget_threshold_crossed", {
+    threshold: budget.crossedThreshold,
+    estimatedUsd: budget.estimatedUsd,
+  });
+  await postStatusAlert(hooks, {
+    title: "Infrastructure budget threshold crossed",
+    level: "warn",
+    service: "robinhood",
+    message: "Configured provider spend crossed " + Math.round(budget.crossedThreshold * 100) + "% of the weekly cap.",
+    fields: [
+      { name: "Estimated spend", value: "$" + Number(budget.estimatedUsd || 0).toFixed(2), inline: true },
+      { name: "Budget", value: "$" + Number(budget.weeklyBudgetUsd || 0).toFixed(2), inline: true },
+    ],
+  });
+  return budget;
+}
+
+async function runConnection({ url, httpUrl, rhCache, tokenCache, hooks, checkBudget, heartbeat, decisionEngine, rickAutoScan }) {
   let state = await readState();
   let nextId = 1;
   let processing = Promise.resolve();
@@ -530,6 +564,7 @@ async function runConnection({ url, httpUrl, rhCache, tokenCache, hooks, heartbe
   if (!active.length) throw new Error("No protocols enabled. Set WATCH_PROTOCOLS=pons,long,flap,pair or add a protocol id.");
   for (const protocol of active) byLogKey.set(routeKey(protocol.address, protocol.topic0), protocol);
 
+  await checkBudgetAndWarn(() => checkBudget({ force: true }), hooks);
   await rhCache.get();
   await writeState(state);
   logJson("listener_start", {
@@ -547,18 +582,33 @@ async function runConnection({ url, httpUrl, rhCache, tokenCache, hooks, heartbe
     let settled = false;
     let subscriptionId = "";
     let backfillStarted = false;
+    let budgetCheckRunning = false;
     const heartbeatTimer = setInterval(() => {
       void heartbeat.tick({ force: true }).catch((err) => console.warn("heartbeat failed:", err.message));
     }, HEARTBEAT_MS).unref();
     const pingTimer = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) ws.ping();
     }, 60_000).unref();
+    const budgetTimer = setInterval(() => {
+      if (budgetCheckRunning) return;
+      budgetCheckRunning = true;
+      void checkBudgetAndWarn(checkBudget, hooks)
+        .catch((err) => {
+          heartbeat.error();
+          console.warn("budget check failed:", err.message);
+          finish(err);
+        })
+        .finally(() => {
+          budgetCheckRunning = false;
+        });
+    }, BUDGET_CHECK_MS).unref();
 
     function finish(err) {
       if (settled) return;
       settled = true;
       clearInterval(heartbeatTimer);
       clearInterval(pingTimer);
+      clearInterval(budgetTimer);
       try { ws.close(); } catch {}
       err ? reject(err) : resolve();
     }
@@ -671,6 +721,8 @@ async function main() {
   const hooks = webhooksFromEnv();
   const rhCache = makeRhCache();
   const tokenCache = makeTokenMetadataCache(httpUrl);
+  const budgetGuard = await createBudgetGuard({ statePath: budgetStatePath, killSwitchPath });
+  const checkBudget = makeBudgetChecker(budgetGuard);
   const rickAutoScan = boolEnv("RICK_AUTOSCAN");
   const heartbeat = createHeartbeat({
     service: "robinhood",
@@ -691,9 +743,13 @@ async function main() {
   let attempt = 0;
   for (;;) {
     try {
-      await runConnection({ url, httpUrl, rhCache, tokenCache, hooks, heartbeat, decisionEngine, rickAutoScan });
+      await runConnection({ url, httpUrl, rhCache, tokenCache, hooks, checkBudget, heartbeat, decisionEngine, rickAutoScan });
       attempt += 1;
     } catch (err) {
+      if (isBudgetStopError(err)) {
+        console.error("robinhood realtime listener stopped:", err.message);
+        process.exit(2);
+      }
       attempt += 1;
       console.warn("realtime listener failed:", err.stack || err.message);
     }
