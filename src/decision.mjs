@@ -27,7 +27,7 @@ export function createDryRunDecisionEngine({
         tx: alert.tx,
         maxUsd,
         maxSlippageBps,
-        reason: "new interesting stock-pair signal",
+        reason: context.reason || (alert.signal?.reasons || []).join(", ") || "new interesting stock-pair signal",
         receivedToDecisionMs: context.receivedToDecisionMs,
       };
       logJson("dry_run_decision", decision);

@@ -412,11 +412,15 @@ export function extractRhAssets(payload) {
     for (const d of asset.deployments || []) {
       if (Number(d.chainId) !== CHAIN_ID || !d.contractAddress) continue;
       const address = normalizeAddr(d.contractAddress);
+      const currentMultiplier = Number(asset.currentMultiplier || 1);
+      const decimals = Number(asset.tokenDecimals ?? 18);
       byAddr[address] = {
         address,
         symbol: asset.tokenSymbol || "UNKNOWN",
         name: asset.tokenName || "",
         logo: asset.logoUrl || "",
+        currentMultiplier: Number.isFinite(currentMultiplier) && currentMultiplier > 0 ? currentMultiplier : 1,
+        decimals: Number.isInteger(decimals) && decimals >= 0 ? decimals : 18,
       };
     }
   }
@@ -613,6 +617,34 @@ export function buildEmbed(alert) {
       inline: false,
     });
   }
+  if (alert.signal) {
+    const signal = alert.signal;
+    fields.push({ name: "Signal", value: (signal.reasons || []).join(" | ") || "Qualified momentum", inline: false });
+    fields.push({ name: "Unique buyers", value: String(signal.uniqueBuyers ?? 0), inline: true });
+    fields.push({
+      name: "Buy volume",
+      value: Number.isFinite(signal.buyVolumeUsd)
+        ? "$" + Math.round(signal.buyVolumeUsd).toLocaleString("en-US")
+        : Number(signal.quoteBuyVolume || 0).toFixed(4) + " " + (signal.quoteSymbol || "quote"),
+      inline: true,
+    });
+    fields.push({ name: "Age", value: Number(signal.ageSeconds || 0).toFixed(1) + "s", inline: true });
+    if (Number.isFinite(signal.estimatedFdvUsd)) {
+      fields.push({ name: "Estimated FDV", value: "$" + Math.round(signal.estimatedFdvUsd).toLocaleString("en-US"), inline: true });
+    }
+    if (Number(signal.maxSameBlockBuyers || 0) >= 2) {
+      const supply = Number.isFinite(signal.bundleSupplyPercent)
+        ? " / " + signal.bundleSupplyPercent.toFixed(2) + "% supply"
+        : "";
+      fields.push({ name: "Bundle indicator", value: signal.maxSameBlockBuyers + " buyers in one block" + supply, inline: true });
+    }
+    if (Number.isFinite(signal.topBuyerSharePercent)) {
+      fields.push({ name: "Top buyer share", value: signal.topBuyerSharePercent.toFixed(1) + "%", inline: true });
+    }
+    if (signal.milestones?.length) {
+      fields.push({ name: "FDV milestones", value: signal.milestones.map((level) => "$" + (level / 1_000) + "k").join(" | "), inline: false });
+    }
+  }
   if (tx) {
     fields.push({
       name: "Tx",
@@ -697,7 +729,7 @@ export function buildStatusEmbed({ title, level = "info", service, message, fiel
 
 export function emptyState() {
   return {
-    stateVersion: 2,
+    stateVersion: 3,
     initialized: false,
     ponsLastBlock: 0,
     ponsApproved: [],
@@ -715,5 +747,7 @@ export function emptyState() {
     pumpLastSignature: "",
     o1Quotes: [],
     rhAssets: {},
+    momentumLastBlock: 0,
+    momentumCandidates: {},
   };
 }

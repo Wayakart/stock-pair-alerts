@@ -33,6 +33,7 @@ jobs:
             --exclude '.git' \
             --exclude 'node_modules' \
             --exclude 'state/*.json' \
+            --exclude 'state/*.ndjson' \
             --exclude 'state/KILL_SWITCH' \
             -e "ssh -i ~/.ssh/stock_pair_do -o IdentitiesOnly=yes" \
             ./ "root@${{ secrets.DO_HOST }}:/opt/stock-pair-alerts/"
@@ -47,6 +48,14 @@ jobs:
           REQUIRE_QUICKNODE_ROBINHOOD=1
           ALLOW_PUBLIC_ROBINHOOD_RPC=0
           WATCH_PROTOCOLS=pons,long,flap,pair
+          PONS_APPROVAL_ALERTS=${{ vars.PONS_APPROVAL_ALERTS || '0' }}
+          MOMENTUM_WINDOW_MS=${{ vars.MOMENTUM_WINDOW_MS || '60000' }}
+          MOMENTUM_TRACKING_MS=${{ vars.MOMENTUM_TRACKING_MS || '3600000' }}
+          MOMENTUM_MIN_UNIQUE_BUYERS=${{ vars.MOMENTUM_MIN_UNIQUE_BUYERS || '3' }}
+          MOMENTUM_MIN_BUY_VOLUME_USD=${{ vars.MOMENTUM_MIN_BUY_VOLUME_USD || '1000' }}
+          MOMENTUM_WHALE_BUY_VOLUME_USD=${{ vars.MOMENTUM_WHALE_BUY_VOLUME_USD || '5000' }}
+          MOMENTUM_MIN_BUNDLE_BUYERS=${{ vars.MOMENTUM_MIN_BUNDLE_BUYERS || '3' }}
+          MOMENTUM_WALLET_FALLBACK_BUYERS=${{ vars.MOMENTUM_WALLET_FALLBACK_BUYERS || '5' }}
           QUICKNODE_MONTHLY_PLAN_USD=${{ vars.QUICKNODE_MONTHLY_PLAN_USD || '249' }}
           QUICKNODE_INCLUDED_CREDITS=${{ vars.QUICKNODE_INCLUDED_CREDITS || '450000000' }}
           QUICKNODE_EXTRA_CREDIT_USD_PER_MILLION=${{ vars.QUICKNODE_EXTRA_CREDIT_USD_PER_MILLION || '0.56' }}

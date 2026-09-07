@@ -389,12 +389,25 @@ test("Discord alert displays the project CA and keeps Rick automation opt-in", (
     projectName: "AI RESERVE",
     quotes: [{ address: normalizeAddr(nvda), symbol: "NVDA" }],
     tx: "0x1234567890",
+    signal: {
+      reasons: ["early buyer momentum"],
+      uniqueBuyers: 4,
+      buyVolumeUsd: 2500,
+      ageSeconds: 18.5,
+      estimatedFdvUsd: 50000,
+      maxSameBlockBuyers: 3,
+      bundleSupplyPercent: 1.25,
+      topBuyerSharePercent: 40,
+      milestones: [20000, 50000],
+    },
   };
   const manual = buildDiscordAlertPayload(alert);
   assert.equal(manual.content, undefined);
   assert.match(manual.embeds[0].title, /\$AIRE/);
   assert.equal(manual.embeds[0].fields[2].value, "`" + project + "`");
   assert.match(manual.embeds[0].fields.find((field) => field.name === "Paired with").value, /NVDA/);
+  assert.equal(manual.embeds[0].fields.find((field) => field.name === "Unique buyers").value, "4");
+  assert.equal(manual.embeds[0].fields.find((field) => field.name === "Buy volume").value, "$2,500");
 
   const automatic = buildDiscordAlertPayload(alert, { rickAutoScan: true });
   assert.equal(automatic.content, ".x " + project);
@@ -443,11 +456,15 @@ test("isStockNumeraire uses RH catalog lookup", () => {
   const next = extractRhAssets({
     assets: [{
       tokenSymbol: "NVDA",
+      currentMultiplier: "1.125000000000000000",
+      tokenDecimals: 18,
       status: "ASSET_STATUS_ACTIVE",
       deployments: [{ contractAddress: nvda, chainId: 4663 }],
     }],
   });
   assert.equal(next[normalizeAddr(nvda)].symbol, "NVDA");
+  assert.equal(next[normalizeAddr(nvda)].currentMultiplier, 1.125);
+  assert.equal(next[normalizeAddr(nvda)].decimals, 18);
 });
 
 test("Alchemy free-tier cap is parsed and does not bounce back above 10", () => {

@@ -11,6 +11,7 @@ import {
   FLAP_ROUTER,
   TOPIC0_FLAP_TOKEN_QUOTE_SET,
   PAIR_COORDINATOR,
+  PAIR_POOL_MANAGER,
   TOPIC0_PAIR_CANONICAL_PROJECT_LAUNCHED,
   RH_ASSETS_URL,
   decodeApprovalLog,
@@ -35,14 +36,24 @@ import {
   hexToBigInt,
   toHex,
 } from "./lib.mjs";
+import {
+  DEFAULT_MOMENTUM_THRESHOLDS,
+  TOPIC0_UNISWAP_V4_SWAP,
+  aggregateV4Swaps,
+  createMomentumCandidate,
+  findCandidatePools,
+  normalizePoolTrade,
+  recordCandidateTrade,
+} from "./momentum.mjs";
 import { createHeartbeat, createLatencyTrace, logJson, msSince, warnJson } from "./metrics.mjs";
-import { readJsonFile, writeJsonFile } from "./state.mjs";
+import { appendJsonLine, readJsonFile, writeJsonFile } from "./state.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const legacyStatePath = path.join(root, "state", "seen.json");
 const statePath = path.join(root, "state", "robinhood.json");
 const budgetStatePath = path.resolve(process.env.BUDGET_STATE_PATH || path.join(root, "state", "budget.json"));
 const killSwitchPath = path.resolve(process.env.KILL_SWITCH_PATH || path.join(root, "state", "KILL_SWITCH"));
+const momentumHistoryPath = path.resolve(process.env.MOMENTUM_HISTORY_PATH || path.join(root, "state", "robinhood-events.ndjson"));
 const UA = "stock-pair-alerts/1.6";
 const DEFAULT_WS = "wss://rpc-robinhood.blockmachine.io";
 const RH_REFRESH_MS = Number(process.env.RH_REFRESH_MS || 300_000);
@@ -54,6 +65,10 @@ const BACKFILL_OVERLAP_BLOCKS = BigInt(process.env.EVM_BACKFILL_OVERLAP_BLOCKS |
 const BOOTSTRAP_LOOKBACK_BLOCKS = BigInt(process.env.EVM_BOOTSTRAP_LOOKBACK_BLOCKS || 100_000);
 const ERC20_NAME_SELECTOR = "0x06fdde03";
 const ERC20_SYMBOL_SELECTOR = "0x95d89b41";
+const ERC20_TOTAL_SUPPLY_SELECTOR = "0x18160ddd";
+const ERC20_DECIMALS_SELECTOR = "0x313ce567";
+const RH_PRICES_URL = "https://api.robinhood.com/rhj/prices/";
+const RH_ALL_PRICES_URL = "https://api.robinhood.com/rhj/prices";
 
 const protocols = [
   {
@@ -90,6 +105,14 @@ const protocols = [
   },
 ];
 
+const momentumProtocol = {
+  id: "momentum",
+  platform: "Uniswap v4",
+  address: PAIR_POOL_MANAGER,
+  topic0: TOPIC0_UNISWAP_V4_SWAP,
+  checkpoint: "momentumLastBlock",
+};
+
 const enabledProtocols = csvSet(process.env.WATCH_PROTOCOLS || "pons,long,flap,pair");
 const includeSymbols = csvSet(process.env.INTERESTING_SYMBOLS, { normalize: (value) => value.toUpperCase() });
 const excludeSymbols = csvSet(process.env.IGNORE_SYMBOLS, { normalize: (value) => value.toUpperCase() });
@@ -101,6 +124,27 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function boolEnv(name) {
   return ["1", "true", "yes"].includes(String(process.env[name] || "").toLowerCase());
+}
+
+function numberEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) throw new Error(name + " must be a non-negative number");
+  return value;
+}
+
+function momentumThresholdsFromEnv() {
+  return {
+    ...DEFAULT_MOMENTUM_THRESHOLDS,
+    earlyWindowMs: numberEnv("MOMENTUM_WINDOW_MS", DEFAULT_MOMENTUM_THRESHOLDS.earlyWindowMs),
+    trackingWindowMs: numberEnv("MOMENTUM_TRACKING_MS", DEFAULT_MOMENTUM_THRESHOLDS.trackingWindowMs),
+    minUniqueBuyers: numberEnv("MOMENTUM_MIN_UNIQUE_BUYERS", DEFAULT_MOMENTUM_THRESHOLDS.minUniqueBuyers),
+    minBuyVolumeUsd: numberEnv("MOMENTUM_MIN_BUY_VOLUME_USD", DEFAULT_MOMENTUM_THRESHOLDS.minBuyVolumeUsd),
+    whaleBuyVolumeUsd: numberEnv("MOMENTUM_WHALE_BUY_VOLUME_USD", DEFAULT_MOMENTUM_THRESHOLDS.whaleBuyVolumeUsd),
+    minBundleBuyers: numberEnv("MOMENTUM_MIN_BUNDLE_BUYERS", DEFAULT_MOMENTUM_THRESHOLDS.minBundleBuyers),
+    walletFallbackBuyers: numberEnv("MOMENTUM_WALLET_FALLBACK_BUYERS", DEFAULT_MOMENTUM_THRESHOLDS.walletFallbackBuyers),
+  };
 }
 
 function wsUrlFromEnv() {
@@ -186,25 +230,54 @@ async function evmRpcBatch(url, calls) {
   });
 }
 
-async function notify(webhooks, payload) {
+function discordEndpoint(raw, { wait = false, messageId = "" } = {}) {
+  const url = new URL(raw);
+  if (messageId) url.pathname = url.pathname.replace(/\/$/, "") + "/messages/" + encodeURIComponent(messageId);
+  if (wait) url.searchParams.set("wait", "true");
+  return url.toString();
+}
+
+async function discordRequest(url, payload, { method = "POST", wait = false } = {}) {
   const body = JSON.stringify(payload);
-  for (const url of webhooks) {
-    for (let attempt = 1; attempt <= 5; attempt++) {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json", "user-agent": UA },
-        body,
-      });
-      if ([200, 204].includes(res.status)) break;
-      const responseBody = await res.text();
-      if (res.status === 429 && attempt < 5) {
-        let wait = 1;
-        try { wait = Number(JSON.parse(responseBody).retry_after) || 1; } catch {}
-        await sleep(Math.min(Math.max(wait, 0.3), 8) * 1000 + 150);
-        continue;
-      }
-      throw new Error("Discord " + res.status + " " + responseBody.slice(0, 120));
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    const res = await fetch(url, {
+      method,
+      headers: { "content-type": "application/json", "user-agent": UA },
+      body,
+    });
+    const responseBody = await res.text();
+    if ([200, 204].includes(res.status)) {
+      if (!wait || !responseBody) return null;
+      try { return JSON.parse(responseBody); } catch { return null; }
     }
+    if (res.status === 429 && attempt < 5) {
+      let retryAfter = 1;
+      try { retryAfter = Number(JSON.parse(responseBody).retry_after) || 1; } catch {}
+      await sleep(Math.min(Math.max(retryAfter, 0.3), 8) * 1000 + 150);
+      continue;
+    }
+    throw new Error("Discord " + res.status + " " + responseBody.slice(0, 120));
+  }
+  return null;
+}
+
+async function notify(webhooks, payload, { wait = false } = {}) {
+  const messages = [];
+  for (let index = 0; index < webhooks.length; index++) {
+    const message = await discordRequest(discordEndpoint(webhooks[index], { wait }), payload, { wait });
+    if (message?.id) messages.push({ webhookIndex: index, messageId: message.id });
+  }
+  return messages;
+}
+
+async function updateNotifications(webhooks, messageIds, payload) {
+  for (const message of messageIds || []) {
+    const webhook = webhooks[message.webhookIndex];
+    if (!webhook || !message.messageId) continue;
+    await discordRequest(discordEndpoint(webhook, { messageId: message.messageId }), payload, {
+      method: "PATCH",
+      wait: true,
+    });
   }
 }
 
@@ -238,24 +311,98 @@ function makeRhCache() {
   };
 }
 
+function decodeRpcUint(value, fallback) {
+  try {
+    return value && value !== "0x" ? BigInt(value) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function makeTokenMetadataCache(httpUrl) {
   const values = new Map();
   return {
-    async get(address) {
+    async get(address, { force = false } = {}) {
       const key = normalizeAddr(address);
-      if (values.has(key)) return values.get(key);
+      if (!force && values.has(key)) return values.get(key);
       let metadata = {};
       try {
-        const [nameResult, symbolResult] = await evmRpcBatch(httpUrl, [
+        const [nameResult, symbolResult, supplyResult, decimalsResult] = await evmRpcBatch(httpUrl, [
           { method: "eth_call", params: [{ to: key, data: ERC20_NAME_SELECTOR }, "latest"] },
           { method: "eth_call", params: [{ to: key, data: ERC20_SYMBOL_SELECTOR }, "latest"] },
+          { method: "eth_call", params: [{ to: key, data: ERC20_TOTAL_SUPPLY_SELECTOR }, "latest"] },
+          { method: "eth_call", params: [{ to: key, data: ERC20_DECIMALS_SELECTOR }, "latest"] },
         ]);
-        metadata = { name: decodeAbiString(nameResult), symbol: decodeAbiString(symbolResult) };
+        metadata = {
+          name: decodeAbiString(nameResult),
+          symbol: decodeAbiString(symbolResult),
+          totalSupply: decodeRpcUint(supplyResult, 0n).toString(),
+          decimals: Number(decodeRpcUint(decimalsResult, 18n)),
+        };
       } catch (err) {
         console.warn("token metadata lookup failed:", key, err.message);
       }
-      values.set(key, metadata);
+      if (metadata.symbol || metadata.name || metadata.totalSupply !== "0") values.set(key, metadata);
       return metadata;
+    },
+  };
+}
+
+function makeRhPriceCache() {
+  const values = new Map();
+  const retryAfter = new Map();
+  const pending = new Map();
+
+  function quoteValue(quote, asset) {
+    const bid = Number(quote?.bid);
+    const ask = Number(quote?.ask);
+    const rawPrice = bid > 0 && ask > 0 ? (bid + ask) / 2 : bid > 0 ? bid : ask;
+    const multiplier = Number(asset?.currentMultiplier || 1);
+    const value = Number.isFinite(rawPrice) && rawPrice > 0 ? rawPrice * multiplier : null;
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+
+  async function refresh(asset) {
+    const symbol = String(asset?.symbol || "").toUpperCase();
+    try {
+      const payload = await httpJson(RH_PRICES_URL + encodeURIComponent(symbol));
+      const quote = payload?.quotes?.[0] || payload?.quote || payload;
+      const value = quoteValue(quote, asset);
+      values.set(symbol, { value, fetchedAt: Date.now() });
+      retryAfter.delete(symbol);
+      return value;
+    } catch (err) {
+      retryAfter.set(symbol, Date.now() + 15_000);
+      warnJson("rh_price_unavailable", { symbol, error: err.message });
+      return values.get(symbol)?.value ?? null;
+    } finally {
+      pending.delete(symbol);
+    }
+  }
+
+  return {
+    async get(asset) {
+      const symbol = String(asset?.symbol || "").toUpperCase();
+      if (!symbol) return null;
+      const cached = values.get(symbol);
+      if (cached && Date.now() - cached.fetchedAt < 15_000) return cached.value;
+      if (Date.now() < (retryAfter.get(symbol) || 0)) return cached?.value ?? null;
+      if (!pending.has(symbol)) pending.set(symbol, refresh(asset));
+      return cached?.value ?? null;
+    },
+    async prime(assets) {
+      try {
+        const bySymbol = new Map((assets || []).map((asset) => [String(asset.symbol || "").toUpperCase(), asset]));
+        const payload = await httpJson(RH_ALL_PRICES_URL);
+        for (const quote of payload?.quotes || []) {
+          const symbol = String(quote.tokenSymbol || quote.symbol || "").toUpperCase();
+          const asset = bySymbol.get(symbol);
+          if (!asset) continue;
+          values.set(symbol, { value: quoteValue(quote, asset), fetchedAt: Date.now() });
+        }
+      } catch (err) {
+        warnJson("rh_price_prime_unavailable", { error: err.message });
+      }
     },
   };
 }
@@ -278,6 +425,238 @@ function uniqueQuotes(events, rhMap) {
     quotes.push({ ...rhMap[address], address });
   }
   return quotes;
+}
+
+async function momentumHistory(type, details) {
+  await appendJsonLine(momentumHistoryPath, {
+    type,
+    recordedAt: new Date().toISOString(),
+    ...details,
+  });
+}
+
+async function blockTimestampMs(httpUrl, blockNumber, blockTimestamp, observedAtMs) {
+  if (blockTimestamp) return Number(BigInt(blockTimestamp)) * 1_000;
+  if (observedAtMs) return observedAtMs;
+  const block = await evmRpc(httpUrl, "eth_getBlockByNumber", [toHex(blockNumber), false]);
+  return block?.timestamp ? Number(BigInt(block.timestamp)) * 1_000 : Date.now();
+}
+
+function momentumAlert(candidate, metrics, reasons, tx) {
+  return {
+    chain: "robinhood",
+    platform: candidate.platform,
+    verb: candidate.discordMessageIds?.length ? "momentum update" : "momentum",
+    projectAddress: candidate.project.address,
+    projectSymbol: candidate.project.symbol,
+    projectName: candidate.project.name,
+    quotes: [candidate.quote],
+    tx,
+    signal: {
+      ...metrics,
+      reasons,
+      quoteSymbol: candidate.quote.symbol,
+      milestones: candidate.milestones,
+    },
+  };
+}
+
+function pruneMomentumCandidates(state, nowMs, trackingWindowMs) {
+  const candidates = { ...(state.momentumCandidates || {}) };
+  for (const [poolId, candidate] of Object.entries(candidates)) {
+    if (nowMs - Number(candidate.launchedAtMs || 0) > trackingWindowMs) delete candidates[poolId];
+  }
+  return candidates;
+}
+
+async function registerMomentumCandidates(context, { platform, projectAddress, quotes, tx, block, blockTimestamp, receipt: knownReceipt }) {
+  const { state, httpUrl, tokenCache, momentumThresholds } = context;
+  const launchedAtMs = await blockTimestampMs(httpUrl, block, blockTimestamp, context.observedAtMs);
+  const receipt = knownReceipt || await evmRpc(httpUrl, "eth_getTransactionReceipt", [tx]);
+  if (!receipt) throw new Error(platform + " launch receipt is not available yet");
+  const projectMeta = await tokenCache.get(projectAddress);
+  const project = {
+    address: normalizeAddr(projectAddress),
+    name: projectMeta.name || "",
+    symbol: projectMeta.symbol || "",
+    totalSupply: projectMeta.totalSupply || "0",
+    decimals: Number.isInteger(projectMeta.decimals) ? projectMeta.decimals : 18,
+  };
+  const pools = findCandidatePools(receipt, project.address, quotes.map((quote) => quote.address));
+  let candidates = pruneMomentumCandidates(state, launchedAtMs, momentumThresholds.trackingWindowMs);
+  await momentumHistory("candidate_seen", {
+    platform,
+    project,
+    quotes,
+    launchTx: tx,
+    launchBlock: block,
+    pools: pools.map((pool) => pool.poolId),
+  });
+  for (const pool of pools) {
+    if (candidates[pool.poolId]) continue;
+    const quote = quotes.find((item) => [pool.currency0, pool.currency1].includes(normalizeAddr(item.address)));
+    if (!quote) continue;
+    const candidate = createMomentumCandidate({
+      pool,
+      platform,
+      project,
+      quote: {
+        ...quote,
+        decimals: Number.isInteger(quote.decimals) ? quote.decimals : 18,
+      },
+      launchTx: tx,
+      launchBlock: block,
+      launchedAtMs,
+    });
+    if (!candidate) continue;
+    candidates = { ...candidates, [pool.poolId]: candidate };
+    logJson("momentum_candidate", {
+      platform,
+      poolId: pool.poolId,
+      project: project.address,
+      quote: quote.address,
+      launchBlock: block,
+    });
+  }
+  if (!pools.length) {
+    warnJson("momentum_pool_missing", { platform, project: project.address, launchTx: tx });
+  }
+  return {
+    ...state,
+    momentumCandidates: candidates,
+    momentumLastBlock: Math.max(Number(state.momentumLastBlock || 0), Number(block || 0)),
+  };
+}
+
+async function handleMomentumLog(context) {
+  const { state, log, httpUrl, rhPriceCache, tokenCache, hooks, decisionEngine, heartbeat, momentumThresholds } = context;
+  const poolId = String(log.topics?.[1] || "").toLowerCase();
+  const block = Number(hexToBigInt(log.blockNumber));
+  let candidates = { ...(state.momentumCandidates || {}) };
+  let candidate = candidates[poolId];
+  if (!candidate || (candidate.processedTxs || []).includes(log.transactionHash)) return state;
+  if (candidate.project.totalSupply === "0") {
+    const metadata = await tokenCache.get(candidate.project.address, { force: true });
+    candidate = {
+      ...candidate,
+      project: {
+        ...candidate.project,
+        name: metadata.name || candidate.project.name,
+        symbol: metadata.symbol || candidate.project.symbol,
+        totalSupply: metadata.totalSupply || candidate.project.totalSupply,
+        decimals: Number.isInteger(metadata.decimals) ? metadata.decimals : candidate.project.decimals,
+      },
+    };
+    candidates[poolId] = candidate;
+  }
+
+  const [transaction, receipt] = await evmRpcBatch(httpUrl, [
+    { method: "eth_getTransactionByHash", params: [log.transactionHash] },
+    { method: "eth_getTransactionReceipt", params: [log.transactionHash] },
+  ]);
+  if (!transaction || !receipt) throw new Error("Swap transaction details are not available yet");
+  const aggregate = aggregateV4Swaps(receipt.logs, poolId);
+  if (!aggregate) return state;
+  if (aggregate.tx === candidate.launchTx) {
+    candidate = { ...candidate, processedTxs: [...(candidate.processedTxs || []), aggregate.tx].slice(-500) };
+    candidates[poolId] = candidate;
+    return { ...state, momentumCandidates: candidates, momentumLastBlock: Math.max(Number(state.momentumLastBlock || 0), block) };
+  }
+
+  const timestampMs = await blockTimestampMs(httpUrl, block, log.blockTimestamp, context.observedAtMs);
+  if (timestampMs - candidate.launchedAtMs > momentumThresholds.trackingWindowMs) {
+    delete candidates[poolId];
+    await momentumHistory("candidate_expired", { poolId, project: candidate.project.address, block });
+    return { ...state, momentumCandidates: candidates, momentumLastBlock: Math.max(Number(state.momentumLastBlock || 0), block) };
+  }
+
+  const quoteUsd = await rhPriceCache.get(candidate.quote);
+  const trade = normalizePoolTrade(candidate, aggregate, {
+    buyer: transaction.from,
+    timestampMs,
+    quoteUsd,
+  });
+  const result = recordCandidateTrade(candidate, trade, momentumThresholds);
+  candidate = result.candidate;
+  candidates[poolId] = candidate;
+  const tradeHistoryWrite = momentumHistory("trade", {
+    poolId,
+    platform: candidate.platform,
+    project: candidate.project.address,
+    quote: candidate.quote.address,
+    trade,
+    metrics: result.metrics,
+  });
+
+  if (result.shouldNotify) {
+    const existingMessage = Object.values(candidates).find((item) =>
+      item.poolId !== candidate.poolId &&
+      item.project.address === candidate.project.address &&
+      item.discordMessageIds?.length
+    );
+    if (existingMessage) candidate.discordMessageIds = existingMessage.discordMessageIds;
+    const alert = momentumAlert(candidate, result.metrics, result.reasons, trade.tx);
+    if (existingMessage) {
+      try {
+        await updateNotifications(hooks, candidate.discordMessageIds, buildDiscordAlertPayload(alert));
+        context.trace?.mark("alert_updated");
+      } catch (err) {
+        console.warn("momentum cross-pool update failed:", err.message);
+      }
+    } else {
+      await decisionEngine.evaluate(alert, {
+        receivedToDecisionMs: context.trace?.elapsedMs(),
+        reason: result.reasons.join(", "),
+      });
+      console.log(JSON.stringify({ alert }));
+      if (!hooks.length) {
+        console.warn("qualified momentum alert ready but DISCORD_WEBHOOK_URL is not set");
+      } else {
+        try {
+          candidate.discordMessageIds = await notify(hooks, buildDiscordAlertPayload(alert, {
+            rickAutoScan: context.rickAutoScan,
+          }), { wait: true });
+          heartbeat?.alert();
+          context.trace?.mark("alert_sent");
+        } catch (err) {
+          console.warn("momentum notify failed:", err.message);
+        }
+      }
+    }
+    candidates[poolId] = candidate;
+    await momentumHistory("qualified", {
+      poolId,
+      project: candidate.project.address,
+      reasons: result.reasons,
+      metrics: result.metrics,
+      tx: trade.tx,
+      discordAction: existingMessage ? "updated_existing_token" : "created",
+    });
+  } else if (result.shouldUpdate) {
+    const reasons = result.newMilestones.map((level) => "$" + (level / 1_000) + "k estimated FDV");
+    const alert = momentumAlert(candidate, result.metrics, reasons, trade.tx);
+    try {
+      await updateNotifications(hooks, candidate.discordMessageIds, buildDiscordAlertPayload(alert));
+      context.trace?.mark("alert_updated");
+    } catch (err) {
+      console.warn("momentum update failed:", err.message);
+    }
+    await momentumHistory("milestone", {
+      poolId,
+      project: candidate.project.address,
+      milestones: result.newMilestones,
+      metrics: result.metrics,
+      tx: trade.tx,
+    });
+  }
+
+  await tradeHistoryWrite;
+
+  return {
+    ...state,
+    momentumCandidates: candidates,
+    momentumLastBlock: Math.max(Number(state.momentumLastBlock || 0), block),
+  };
 }
 
 async function sendAlert({ hooks, alert, decisionEngine, trace, heartbeat, rickAutoScan }) {
@@ -313,6 +692,14 @@ async function handlePonsLog(context) {
     meta = rhMap[event.pairToken] || {};
   }
   if (!alertAllowed(meta, event.pairToken)) return next;
+  await momentumHistory("catalog_event", {
+    platform: "Pons",
+    project: event.pairToken,
+    symbol: meta.symbol || "",
+    tx: event.tx,
+    block: event.block,
+  });
+  if (!boolEnv("PONS_APPROVAL_ALERTS")) return next;
   await sendAlert({
     ...context,
     alert: {
@@ -352,20 +739,14 @@ async function handleLongLog(context) {
 
   const quote = rhMap[event.numeraire] || {};
   if (!alertAllowed(quote, event.numeraire)) return next;
-  const project = await tokenCache.get(event.asset);
-  await sendAlert({
-    ...context,
-    alert: {
-      chain: "robinhood",
-      platform: "Long",
-      projectAddress: event.asset,
-      projectSymbol: project.symbol,
-      projectName: project.name,
-      quotes: [{ ...quote, address: event.numeraire }],
-      tx: event.tx,
-    },
+  return registerMomentumCandidates({ ...context, state: next }, {
+    platform: "Long",
+    projectAddress: event.asset,
+    quotes: [{ ...quote, address: event.numeraire }],
+    tx: event.tx,
+    block: event.block,
+    blockTimestamp: log.blockTimestamp,
   });
-  return next;
 }
 
 async function handleFlapLog(context) {
@@ -389,29 +770,24 @@ async function handleFlapLog(context) {
 
   const quote = rhMap[event.quote] || {};
   if (!alertAllowed(quote, event.quote)) return next;
-  const project = await tokenCache.get(event.token);
-  await sendAlert({
-    ...context,
-    alert: {
-      chain: "robinhood",
-      platform: "Flap",
-      projectAddress: event.token,
-      projectSymbol: project.symbol,
-      projectName: project.name,
-      quotes: [{ ...quote, address: event.quote }],
-      tx: event.tx,
-    },
+  return registerMomentumCandidates({ ...context, state: next }, {
+    platform: "Flap",
+    projectAddress: event.token,
+    quotes: [{ ...quote, address: event.quote }],
+    tx: event.tx,
+    block: event.block,
+    blockTimestamp: log.blockTimestamp,
   });
-  return next;
 }
 
 async function pairPoolsFromReceipt(httpUrl, event) {
   const receipt = await evmRpc(httpUrl, "eth_getTransactionReceipt", [event.tx]);
   if (!receipt) throw new Error("Pair launch receipt is not available yet");
-  return (receipt.logs || [])
+  const pools = (receipt.logs || [])
     .filter((log) => normalizeAddr(log.address) === normalizeAddr(PAIR_COORDINATOR))
     .map(decodePairCanonicalPoolLog)
     .filter((pool) => pool && pool.project === event.project);
+  return { receipt, pools };
 }
 
 async function handlePairLog(context) {
@@ -426,7 +802,7 @@ async function handlePairLog(context) {
   }
 
   let rhMap = await rhCache.get();
-  const pools = await pairPoolsFromReceipt(httpUrl, event);
+  const { receipt, pools } = await pairPoolsFromReceipt(httpUrl, event);
   let quotes = uniqueQuotes(pools, rhMap);
   if (!quotes.length) {
     rhMap = await rhCache.get({ force: true });
@@ -442,24 +818,19 @@ async function handlePairLog(context) {
   };
   if (!applied.alerts.length) return next;
 
-  const project = await tokenCache.get(event.project);
-  await sendAlert({
-    ...context,
-    alert: {
-      chain: "robinhood",
-      platform: "Pair",
-      projectAddress: event.project,
-      projectSymbol: project.symbol,
-      projectName: project.name,
-      quotes,
-      tx: event.tx,
-      extra: quotes.length + " Robinhood stock pool" + (quotes.length === 1 ? "" : "s") + " created.",
-    },
+  return registerMomentumCandidates({ ...context, state: next }, {
+    platform: "Pair",
+    projectAddress: event.project,
+    quotes,
+    tx: event.tx,
+    block: event.block,
+    blockTimestamp: log.blockTimestamp,
+    receipt,
   });
-  return next;
 }
 
 async function processLog(context) {
+  if (context.protocol.id === "momentum") return handleMomentumLog(context);
   if (context.protocol.id === "pons") return handlePonsLog(context);
   if (context.protocol.id === "long") return handleLongLog(context);
   if (context.protocol.id === "flap") return handleFlapLog(context);
@@ -519,8 +890,57 @@ async function runBackfill(context) {
       bootstrap,
     });
   }
+  context.state = await runMomentumBackfill(context, latest);
   context.state.initialized = true;
   await writeState(context.state);
+  return context.state;
+}
+
+async function runMomentumBackfill(context, latest) {
+  const nowMs = Date.now();
+  context.state.momentumCandidates = pruneMomentumCandidates(
+    context.state,
+    nowMs,
+    context.momentumThresholds.trackingWindowMs
+  );
+  const candidates = Object.values(context.state.momentumCandidates || {});
+  if (!candidates.length) {
+    context.state.momentumLastBlock = Number(latest);
+    return context.state;
+  }
+  const checkpoint = BigInt(context.state.momentumLastBlock || 0);
+  const oldestLaunch = BigInt(Math.min(...candidates.map((candidate) => Number(candidate.launchBlock || latest))));
+  const fromBlock = checkpoint === 0n
+    ? oldestLaunch
+    : (checkpoint >= BACKFILL_OVERLAP_BLOCKS ? checkpoint - BACKFILL_OVERLAP_BLOCKS + 1n : 0n);
+  const logs = await getLogsRange(context.httpUrl, momentumProtocol, fromBlock, latest);
+  for (const log of logs) {
+    const poolId = String(log.topics?.[1] || "").toLowerCase();
+    if (!context.state.momentumCandidates?.[poolId]) continue;
+    const trace = createLatencyTrace({
+      chain: "robinhood",
+      platform: context.state.momentumCandidates[poolId].platform,
+      tx: log.transactionHash,
+      block: Number(hexToBigInt(log.blockNumber)),
+      source: "backfill",
+    });
+    context.state = await processLog({
+      ...context,
+      state: context.state,
+      protocol: momentumProtocol,
+      log,
+      trace,
+      allowAlerts: true,
+    });
+    trace.done("momentum_backfill_handled");
+  }
+  context.state.momentumLastBlock = Math.max(Number(context.state.momentumLastBlock || 0), Number(latest));
+  logJson("momentum_backfill", {
+    fromBlock: Number(fromBlock),
+    toBlock: Number(latest),
+    logs: logs.length,
+    candidates: Object.keys(context.state.momentumCandidates || {}).length,
+  });
   return context.state;
 }
 
@@ -555,7 +975,19 @@ async function checkBudgetAndWarn(checkBudget, hooks) {
   return budget;
 }
 
-async function runConnection({ url, httpUrl, rhCache, tokenCache, hooks, checkBudget, heartbeat, decisionEngine, rickAutoScan }) {
+async function runConnection({
+  url,
+  httpUrl,
+  rhCache,
+  rhPriceCache,
+  tokenCache,
+  hooks,
+  checkBudget,
+  heartbeat,
+  decisionEngine,
+  rickAutoScan,
+  momentumThresholds,
+}) {
   let state = await readState();
   let nextId = 1;
   let processing = Promise.resolve();
@@ -563,15 +995,19 @@ async function runConnection({ url, httpUrl, rhCache, tokenCache, hooks, checkBu
   const active = protocols.filter((protocol) => enabledProtocols.has(protocol.id));
   if (!active.length) throw new Error("No protocols enabled. Set WATCH_PROTOCOLS=pons,long,flap,pair or add a protocol id.");
   for (const protocol of active) byLogKey.set(routeKey(protocol.address, protocol.topic0), protocol);
+  byLogKey.set(routeKey(momentumProtocol.address, momentumProtocol.topic0), momentumProtocol);
+  const subscriptionProtocols = [...active, momentumProtocol];
 
   await checkBudgetAndWarn(() => checkBudget({ force: true }), hooks);
-  await rhCache.get();
+  const rhMap = await rhCache.get();
+  void rhPriceCache.prime(Object.values(rhMap));
   await writeState(state);
   logJson("listener_start", {
     mode: "realtime",
     url: redactUrl(url),
     httpUrl: redactUrl(httpUrl),
     protocols: active.map((protocol) => protocol.id),
+    momentumThresholds,
     hasWebhook: hooks.length > 0,
     rickAutoScan,
     statePath,
@@ -629,8 +1065,8 @@ async function runConnection({ url, httpUrl, rhCache, tokenCache, hooks, checkBu
         id: nextId++,
         method: "eth_subscribe",
         params: ["logs", {
-          address: active.map((protocol) => protocol.address),
-          topics: [[...new Set(active.map((protocol) => protocol.topic0))]],
+          address: [...new Set(subscriptionProtocols.map((protocol) => protocol.address))],
+          topics: [[...new Set(subscriptionProtocols.map((protocol) => protocol.topic0))]],
         }],
       }));
     });
@@ -638,11 +1074,12 @@ async function runConnection({ url, httpUrl, rhCache, tokenCache, hooks, checkBu
     ws.on("message", (data) => {
       heartbeat.message();
       const receivedNs = process.hrtime.bigint();
+      const observedAtMs = Date.now();
       try {
         const msg = JSON.parse(String(data));
         if (msg.id && msg.result) {
           subscriptionId = msg.result;
-          console.log(JSON.stringify({ subscribed: active.map((protocol) => protocol.id), subscription: subscriptionId }));
+          console.log(JSON.stringify({ subscribed: subscriptionProtocols.map((protocol) => protocol.id), subscription: subscriptionId }));
           if (!backfillStarted) {
             backfillStarted = true;
             enqueue(async () => {
@@ -651,11 +1088,13 @@ async function runConnection({ url, httpUrl, rhCache, tokenCache, hooks, checkBu
                 active,
                 httpUrl,
                 rhCache,
+                rhPriceCache,
                 tokenCache,
                 hooks,
                 heartbeat,
                 decisionEngine,
                 rickAutoScan,
+                momentumThresholds,
               });
             });
           }
@@ -677,21 +1116,27 @@ async function runConnection({ url, httpUrl, rhCache, tokenCache, hooks, checkBu
         trace.mark("received", { providerToHandlerMs: Number(msSince(receivedNs).toFixed(3)) });
         enqueue(async () => {
           try {
-            state = await processLog({
+            const nextState = await processLog({
               state,
               protocol,
               log,
               httpUrl,
               rhCache,
+              rhPriceCache,
               tokenCache,
               hooks,
               heartbeat,
               decisionEngine,
               trace,
               rickAutoScan,
+              momentumThresholds,
+              observedAtMs,
               allowAlerts: true,
             });
-            await writeState(state);
+            if (nextState !== state) {
+              state = nextState;
+              await writeState(state);
+            }
             trace.done("handled");
             await heartbeat.tick();
           } catch (err) {
@@ -720,10 +1165,12 @@ async function main() {
   const httpUrl = httpUrlFromEnv(url);
   const hooks = webhooksFromEnv();
   const rhCache = makeRhCache();
+  const rhPriceCache = makeRhPriceCache();
   const tokenCache = makeTokenMetadataCache(httpUrl);
   const budgetGuard = await createBudgetGuard({ statePath: budgetStatePath, killSwitchPath });
   const checkBudget = makeBudgetChecker(budgetGuard);
   const rickAutoScan = boolEnv("RICK_AUTOSCAN");
+  const momentumThresholds = momentumThresholdsFromEnv();
   const heartbeat = createHeartbeat({
     service: "robinhood",
     intervalMs: HEARTBEAT_MS,
@@ -743,7 +1190,19 @@ async function main() {
   let attempt = 0;
   for (;;) {
     try {
-      await runConnection({ url, httpUrl, rhCache, tokenCache, hooks, checkBudget, heartbeat, decisionEngine, rickAutoScan });
+      await runConnection({
+        url,
+        httpUrl,
+        rhCache,
+        rhPriceCache,
+        tokenCache,
+        hooks,
+        checkBudget,
+        heartbeat,
+        decisionEngine,
+        rickAutoScan,
+        momentumThresholds,
+      });
       attempt += 1;
     } catch (err) {
       if (isBudgetStopError(err)) {

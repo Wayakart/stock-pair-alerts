@@ -1,6 +1,6 @@
 # stock-pair-alerts
 
-Discord alerts when Pons, Long.xyz, Flap, Pair Fund, or watched Solana launchpads get a new tokenized-stock quote asset.
+High-signal Discord alerts when Long.xyz, Flap, Pair Fund, or watched Solana launchpads show meaningful activity around a tokenized-stock pair.
 
 The fastest mode is the realtime WebSocket listener. The GitHub Actions poller is still useful as a free fallback/reconciler, but scheduled Actions are not real time.
 
@@ -8,19 +8,28 @@ This is not a new-memecoin bot. The realtime listener watches onchain protocol e
 
 ## What it watches
 
-- Pons: `PairTokenApprovalUpdated(approved=true)` on `0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e`
-- Long.xyz: every distinct `LaunchCreated` on LongLauncher `0x22e99278308B393ea1260859B181AD7E78f5eeED` whose `numeraire` is a Robinhood stock token. Launches are deduplicated by transaction, so multiple projects paired with the same stock still alert.
-- Flap: first `TokenQuoteSet` on the Flap router `0x26605f322f7ff986f381bb9a6e3f5dab0beaeb09` whose quote asset is a Robinhood stock token. Repeat token/quote pairs are ignored.
-- Pair Fund: current V2 `CanonicalProjectLaunched` events on the coordinator `0xf98b202fd8717b79f9c5e5dd67c2f9e640bbd25d`. The listener reads all `CanonicalPoolLaunched` events from the same receipt and emits one project alert containing every Robinhood stock quote.
+- Pons: `PairTokenApprovalUpdated(approved=true)` on `0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e`. Approvals are recorded internally and do not alert by default because they are catalog events, not trading momentum.
+- Long.xyz: distinct `LaunchCreated` events on LongLauncher `0x22e99278308B393ea1260859B181AD7E78f5eeED` whose `numeraire` is a Robinhood stock token.
+- Flap: first `TokenQuoteSet` on the Flap router `0x26605f322f7ff986f381bb9a6e3f5dab0beaeb09` whose quote asset is a Robinhood stock token.
+- Pair Fund: current V2 `CanonicalProjectLaunched` events on the coordinator `0xf98b202fd8717b79f9c5e5dd67c2f9e640bbd25d`, including every Robinhood stock pool initialized in the launch receipt.
 - Pump.fun sentinel: Pump `CreateEvent` data is decoded directly from `Create` and `CreateV2` stream logs. The new token's name, symbol, mint, and quote mint arrive without a `getTransaction` round trip. It alerts only when `quote_mint` is a tracked StonkFun Solana stock mint.
 
-Every launch alert displays the new project token first: ticker, contract address or mint, paired stock ticker(s), quote addresses, transaction, and a copyable Rick command. The paired stock address is never used as the project CA.
+Robinhood launches are registered as candidates instead of alerting immediately. The listener subscribes to Uniswap v4 PoolManager swaps and alerts when a candidate reaches one of these default signals:
+
+- At least 3 unique buyers and $1,000 of buy volume in the first 60 seconds.
+- At least $5,000 of buy volume in the first 60 seconds.
+- At least 3 unique buyers in one block, shown as a coordination risk indicator.
+- At least 5 unique buyers in 60 seconds when Robinhood's USD quote endpoint is temporarily unavailable.
+- An estimated $20k, $50k, or $100k FDV, gated by at least 3 buyers or $1,000 of buy volume so dust swaps cannot trigger it alone.
+
+The first qualified signal creates one Discord message and optionally triggers Rick once. Later FDV milestones edit that message in place. Each alert displays the project ticker and CA, paired stock, buyer count, buy volume, bundle indicators, estimated FDV when available, and signal transaction.
 
 Seen addresses are stored on disk so Discord does not repeat. First Pons run and the Long historical backfill are silent.
 
 The realtime services use separate runtime state files:
 
 - `state/robinhood.json`: Robinhood Chain seen pairs.
+- `state/robinhood-events.ndjson`: append-only Robinhood candidate, normalized trade, qualification, and milestone history for later tuning.
 - `state/solana.json`: Solana/Pump seen stock-mint launches.
 - `state/budget.json`: Helius budget telemetry.
 - `state/KILL_SWITCH`: manual or automatic stop file for the Solana budget guard.
@@ -100,6 +109,15 @@ Environment variables:
 - `REQUIRE_QUICKNODE_ROBINHOOD`: set to `1` in production so a non-QuickNode Robinhood URL is rejected.
 - `ALLOW_PUBLIC_ROBINHOOD_RPC`: set to `1` only for local smoke tests without a private Robinhood endpoint.
 - `WATCH_PROTOCOLS`: comma-separated protocol ids. Defaults to `pons,long,flap,pair`.
+- `PONS_APPROVAL_ALERTS`: set to `1` to restore immediate Pons approval alerts. Defaults to `0`.
+- `MOMENTUM_WINDOW_MS`: early-signal window after launch. Defaults to `60000`.
+- `MOMENTUM_TRACKING_MS`: how long a pool remains active for milestone tracking. Defaults to `3600000`.
+- `MOMENTUM_MIN_UNIQUE_BUYERS`: buyers required alongside minimum USD volume. Defaults to `3`.
+- `MOMENTUM_MIN_BUY_VOLUME_USD`: early momentum and milestone volume gate. Defaults to `1000`.
+- `MOMENTUM_WHALE_BUY_VOLUME_USD`: standalone early buy-volume trigger. Defaults to `5000`.
+- `MOMENTUM_MIN_BUNDLE_BUYERS`: same-block unique-buyer trigger. Defaults to `3`.
+- `MOMENTUM_WALLET_FALLBACK_BUYERS`: wallet trigger used only when the USD price is unavailable. Defaults to `5`.
+- `MOMENTUM_HISTORY_PATH`: optional override for the append-only NDJSON history path.
 - `SOLANA_RPC_HTTP_URL`: paid Solana HTTP RPC URL used for provider access and operational recovery. Pump create alerts decode directly from stream logs on the hot path.
 - `SOLANA_RPC_WS_URL`: paid Solana WebSocket RPC URL for Pump program logs. Required for production.
 - `SOLANA_WATCH_PROTOCOLS`: comma-separated Solana protocol ids. Defaults to `pump`.
@@ -138,9 +156,10 @@ For day-one performance, use a paid Solana RPC provider for `SOLANA_RPC_HTTP_URL
 Realtime alerts are not the same thing as execution. The app now separates the latency-sensitive detection path from human notifications:
 
 - Provider event received.
-- Protocol-specific decode/classification.
+- Protocol-specific launch registration and Uniswap v4 swap aggregation.
+- Buyer, USD buy-volume, bundle, and estimated-FDV classification.
 - Dry-run trading decision logged as `dry_run_decision`.
-- Discord notification sent for human visibility.
+- One Discord notification sent for a qualified signal; later FDV milestones edit it in place.
 
 Latency traces are logged as structured JSON events named `latency`. Heartbeats are logged as `heartbeat`, and stale WebSocket warnings are logged and sent to Discord.
 
