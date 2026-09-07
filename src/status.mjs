@@ -1,5 +1,12 @@
 import fs from "node:fs/promises";
-import { fetchHeliusUsage } from "./budget.mjs";
+import {
+  estimateQuickNodeUsd,
+  fetchDigitalOceanBalance,
+  fetchHeliusUsage,
+  fetchQuickNodeInvoices,
+  fetchQuickNodeUsage,
+  summarizeQuickNodeInvoices,
+} from "./budget.mjs";
 import { readJsonFile } from "./state.mjs";
 
 async function loadEnvFile(file) {
@@ -35,21 +42,38 @@ async function main() {
   const robinhood = await readJsonFile("state/robinhood.json", legacy);
   const solana = await readJsonFile("state/solana.json", legacy);
   const budgetState = await readJsonFile("state/budget.json", {});
-  const heliusUsage = await fetchHeliusUsage({
-    apiKey: process.env.HELIUS_API_KEY,
-    projectId: process.env.HELIUS_PROJECT_ID,
-  });
+  const [heliusUsage, quicknodeUsage, quicknodeInvoices, digitalOceanBalance] = await Promise.all([
+    fetchHeliusUsage({
+      apiKey: process.env.HELIUS_API_KEY,
+      projectId: process.env.HELIUS_PROJECT_ID,
+    }),
+    fetchQuickNodeUsage({ apiKey: process.env.QUICKNODE_ADMIN_API_KEY }),
+    fetchQuickNodeInvoices({ apiKey: process.env.QUICKNODE_ADMIN_API_KEY }),
+    fetchDigitalOceanBalance({ token: process.env.DIGITALOCEAN_BILLING_TOKEN }),
+  ]);
 
   const quicknodeMonthlyUsd = numEnv("QUICKNODE_MONTHLY_PLAN_USD", 249);
+  const quicknodeEstimatedUsd = estimateQuickNodeUsd(quicknodeUsage, {
+    planUsd: quicknodeMonthlyUsd,
+    includedCredits: numEnv("QUICKNODE_INCLUDED_CREDITS", 450_000_000),
+    extraCreditUsdPerMillion: numEnv("QUICKNODE_EXTRA_CREDIT_USD_PER_MILLION", 0.56),
+  });
+  const quicknodeInvoiceSummary = summarizeQuickNodeInvoices(quicknodeInvoices, {
+    sinceMs: Date.now() - 7 * 24 * 60 * 60 * 1000,
+  });
+  const quicknodeBudgetUsd = Math.max(quicknodeEstimatedUsd, quicknodeInvoiceSummary.paidSinceUsd);
   const digitalOceanMonthlyUsd = numEnv("DIGITALOCEAN_MONTHLY_USD", 6);
+  const digitalOceanMonthToDateUsd = Number(digitalOceanBalance?.month_to_date_usage || 0);
+  const digitalOceanEstimatedUsd = Math.max(digitalOceanMonthlyUsd, digitalOceanMonthToDateUsd);
   const configuredHeliusMonthlyUsd = numEnv("HELIUS_MONTHLY_PLAN_USD", 499);
   const heliusMonthlyUsd = String(heliusUsage?.subscriptionDetails?.plan || "").toLowerCase() === "free"
     ? 0
     : configuredHeliusMonthlyUsd;
-  const monthlyCommittedUsd = quicknodeMonthlyUsd + digitalOceanMonthlyUsd + heliusMonthlyUsd;
+  const monthlyCommittedUsd = quicknodeEstimatedUsd + digitalOceanEstimatedUsd + heliusMonthlyUsd;
+  const budgetRecognizedUsd = quicknodeBudgetUsd + digitalOceanEstimatedUsd + heliusMonthlyUsd;
   const weeklyFixedUsd =
-    monthlyToWeek(quicknodeMonthlyUsd) +
-    monthlyToWeek(digitalOceanMonthlyUsd) +
+    monthlyToWeek(quicknodeEstimatedUsd) +
+    monthlyToWeek(digitalOceanEstimatedUsd) +
     monthlyToWeek(heliusMonthlyUsd);
 
   const weekStartedAt = budgetState.budget?.weekStartedAt;
@@ -76,12 +100,28 @@ async function main() {
       creditsRemaining: heliusUsage?.creditsRemaining,
       projectedCreditsWeek: projectedHeliusCreditsWeek,
     },
+    quicknode: {
+      telemetryConfigured: Boolean(process.env.QUICKNODE_ADMIN_API_KEY),
+      creditsUsed: Number((quicknodeUsage?.data || quicknodeUsage)?.credits_used || 0),
+      creditsRemaining: Number((quicknodeUsage?.data || quicknodeUsage)?.credits_remaining || 0),
+      overageCredits: Number((quicknodeUsage?.data || quicknodeUsage)?.overages || 0),
+      invoiceSpendLast7DaysUsd: quicknodeInvoiceSummary.paidSinceUsd,
+      billingCadence: summarizeQuickNodeInvoices(quicknodeInvoices).cadence,
+    },
+    digitalOcean: {
+      telemetryConfigured: Boolean(process.env.DIGITALOCEAN_BILLING_TOKEN),
+      monthToDateUsd: digitalOceanMonthToDateUsd,
+      usageGeneratedAt: digitalOceanBalance?.generated_at,
+    },
     budget: budgetState.budget || null,
     projectedSpend: {
       quicknodeMonthlyUsd,
+      quicknodeEstimatedUsd,
+      quicknodeBudgetUsd,
       heliusMonthlyUsd,
-      digitalOceanMonthlyUsd,
+      digitalOceanMonthlyUsd: digitalOceanEstimatedUsd,
       monthlyCommittedUsd,
+      budgetRecognizedUsd,
       weeklyFixedUsd: Number(weeklyFixedUsd.toFixed(2)),
       note: "Fixed weekly projection is monthly plan costs annualized to one week; provider bills may charge monthly upfront.",
     },

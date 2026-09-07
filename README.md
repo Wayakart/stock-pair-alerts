@@ -61,12 +61,16 @@ Set these Helius values:
 - `DRY_RUN_MAX_USD=100`: simulated max buy size.
 - `DRY_RUN_MAX_SLIPPAGE_BPS=500`: simulated max slippage.
 - `QUICKNODE_MONTHLY_PLAN_USD=249`: QuickNode monthly plan assumption used by status projections.
+- `QUICKNODE_ADMIN_API_KEY`: paid-plan Admin API key used to read current credits and overages.
+- `REQUIRE_QUICKNODE_BUDGET_API=1`: fail closed if QuickNode usage telemetry is unavailable.
 - `DIGITALOCEAN_MONTHLY_USD=6`: DigitalOcean monthly droplet assumption used by status projections.
 - `DIGITALOCEAN_MONTHLY_HARD_CAP_USD=6`: fail-closed ceiling for the configured DigitalOcean monthly commitment.
+- `DIGITALOCEAN_BILLING_TOKEN`: read-only `billing:read` token used to read month-to-date account usage.
+- `REQUIRE_DIGITALOCEAN_BUDGET_API=1`: fail closed if DigitalOcean billing telemetry is unavailable.
 
-Both realtime listeners share usage estimates in `state/budget.json`. The estimate includes the configured monthly QuickNode and DigitalOcean commitments, the Helius plan and overage estimate, and any manually recorded local spend. If the Helius Admin API reports the Free plan, its plan estimate is forced to `$0`. If the total reaches the cap, either listener writes `state/KILL_SWITCH` and exits with code `2`; both services refuse to restart while that file exists. Delete the file only after intentionally raising or resetting the budget.
+Both realtime listeners share usage estimates in `state/budget.json`. The estimate includes QuickNode plan usage and paid invoices from the trailing seven days, the configured DigitalOcean commitment and reported month-to-date usage, the Helius plan and overage estimate, and any manually recorded local spend. This makes an annual QuickNode invoice count at its full paid amount instead of its advertised monthly equivalent. If the Helius Admin API reports the Free plan, its plan estimate is forced to `$0`. If the total reaches the cap, either listener writes `state/KILL_SWITCH` and exits with code `2`; both services refuse to restart while that file exists. Delete the file only after intentionally raising or resetting the budget.
 
-`DIGITALOCEAN_MONTHLY_HARD_CAP_USD` is a local configuration ceiling: both listeners fail closed if `DIGITALOCEAN_MONTHLY_USD` exceeds it. The fixed-size droplet limits its base compute price, but DigitalOcean does not provide an account-level spend hard cap. This control cannot prevent charges created outside this deployment, such as extra resources, backups, or bandwidth overages.
+`DIGITALOCEAN_MONTHLY_HARD_CAP_USD` is a local enforcement ceiling: both listeners fail closed if the configured commitment exceeds it or the Billing API reports month-to-date account usage at the cap. The fixed-size droplet limits its base compute price, but DigitalOcean does not provide an account-level spend hard cap. Stopping these processes also does not stop Droplet billing, so this cannot guarantee that charges created outside this deployment, such as extra resources, backups, or bandwidth overages, stay below the ceiling.
 
 Also set the Helius dashboard Usage autoscaling limit so the account cannot spend past your intended ceiling. The local kill switch can stop this process from making more requests, but it cannot reverse a monthly plan charge or control other API keys using the same Helius account.
 
@@ -82,6 +86,8 @@ Set:
 - `REQUIRE_QUICKNODE_ROBINHOOD=1`: fail closed if the configured Robinhood endpoint is not a QuickNode URL.
 - `ALLOW_PUBLIC_ROBINHOOD_RPC=0`: keep the listener fail-closed if the private URL is missing.
 - `WATCH_PROTOCOLS=pons,long,flap,pair`: enabled Robinhood protocols.
+- `QUICKNODE_ADMIN_API_KEY`: separate QuickNode Admin API key for usage and overage checks; the endpoint auth token is not sufficient.
+- `REQUIRE_QUICKNODE_BUDGET_API=1`: stop both listeners when QuickNode usage cannot be verified.
 
 For sniper-style latency, deploy the bot in the region closest to the QuickNode endpoint and verify p95/p99 WebSocket log latency during market-open bursts. Avoid the public endpoint except for local smoke tests.
 
@@ -109,8 +115,12 @@ Environment variables:
 - `HELIUS_EXTRA_CREDIT_USD_PER_MILLION`: extra credit cost. Defaults to `5`.
 - `WEEKLY_BUDGET_USD`: weekly local kill-switch threshold. Defaults to `1000`.
 - `BUDGET_CHECK_MS`: minimum runtime interval between budget checks. Defaults to `60000`.
+- `QUICKNODE_INCLUDED_CREDITS`: credits included in the selected QuickNode plan. Defaults to `450000000`.
+- `QUICKNODE_EXTRA_CREDIT_USD_PER_MILLION`: overage price used for QuickNode spend estimates. Defaults to `0.56`.
 - `DIGITALOCEAN_MONTHLY_USD`: expected monthly DigitalOcean commitment included in budget estimates.
 - `DIGITALOCEAN_MONTHLY_HARD_CAP_USD`: maximum configured DigitalOcean monthly commitment; both realtime listeners stop if it is exceeded.
+- `DIGITALOCEAN_BILLING_TOKEN`: DigitalOcean token restricted to `billing:read`.
+- `REQUIRE_DIGITALOCEAN_BUDGET_API`: stop both listeners when DigitalOcean usage cannot be verified.
 - `INTERESTING_SYMBOLS`: optional comma-separated ticker allowlist, for example `NVDA,TSLA,HOOD`.
 - `IGNORE_SYMBOLS`: optional comma-separated ticker blocklist.
 - `INTERESTING_ADDRESSES`: optional comma-separated token-address allowlist.

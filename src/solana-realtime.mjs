@@ -620,5 +620,5 @@ async function main() {
 
 main().catch((err) => {
   console.error(err.stack || err.message);
-  process.exit(1);
+  process.exit(isBudgetStopError(err) ? 2 : 1);
 });
