@@ -244,6 +244,7 @@ async function runConnection({ wsUrl, httpUrl, stockCache, hooks, budgetGuard, h
   let nextId = 1;
   const checkBudget = makeBudgetChecker(budgetGuard);
   await stockCache.get();
+  await writeState(state);
   const budget = await checkBudget({ force: true });
   logJson("listener_start", {
     mode: "solana-realtime",
