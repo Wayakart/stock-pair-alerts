@@ -16,6 +16,7 @@ import {
   findPumpStockLaunch,
   applyPumpStockLaunches,
   isInterestingSolanaAsset,
+  redactUrl,
 } from "./lib.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -221,8 +222,8 @@ async function runConnection({ wsUrl, httpUrl, stockCache, hooks, budgetGuard })
   await checkBudget({ force: true });
   console.log(JSON.stringify({
     mode: "solana-realtime",
-    wsUrl,
-    httpUrl,
+    wsUrl: redactUrl(wsUrl),
+    httpUrl: redactUrl(httpUrl),
     protocols: ["pump"],
     hasWebhook: hooks.length > 0,
     interestingSymbols: [...includeSymbols],

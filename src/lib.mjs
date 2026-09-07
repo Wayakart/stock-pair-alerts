@@ -50,6 +50,23 @@ export function growLogChunk(size, maxSize) {
   return grown > maxSize ? maxSize : grown;
 }
 
+export function redactUrl(raw) {
+  try {
+    const url = new URL(String(raw || ""));
+    url.username = url.username ? "REDACTED" : "";
+    url.password = url.password ? "REDACTED" : "";
+    for (const key of [...url.searchParams.keys()]) {
+      if (/api|key|token|secret|auth/i.test(key)) url.searchParams.set(key, "REDACTED");
+    }
+    if (/quiknode\.pro$/i.test(url.hostname)) {
+      url.pathname = url.pathname === "/" ? "/" : "/REDACTED/";
+    }
+    return url.toString();
+  } catch {
+    return String(raw || "").replace(/(api-key=)[^&\s]+/gi, "$1REDACTED");
+  }
+}
+
 
 export function normalizeAddr(addr) {
   if (!addr) return "";

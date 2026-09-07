@@ -26,6 +26,7 @@ import {
   csvSet,
   isInterestingAsset,
   normalizeAddr,
+  redactUrl,
 } from "./lib.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -333,7 +334,7 @@ async function runConnection({ url, rhCache, hooks }) {
   await rhCache.get();
   console.log(JSON.stringify({
     mode: "realtime",
-    url,
+    url: redactUrl(url),
     protocols: active.map((p) => p.id),
     hasWebhook: hooks.length > 0,
     interestingSymbols: [...includeSymbols],
