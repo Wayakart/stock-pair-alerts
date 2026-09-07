@@ -33,6 +33,7 @@ import {
   isInterestingAsset,
   isInterestingSolanaAsset,
   PUMP_PROGRAM,
+  redactUrl,
 } from "../src/lib.mjs";
 
 const nvda = "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC";
@@ -390,4 +391,15 @@ test("isInterestingSolanaAsset preserves case-sensitive mint allowlists", () => 
     { address: nvdax, symbol: "NVDAX" },
     { includeAddresses: new Set([nvdax.toLowerCase()]) }
   ), false);
+});
+
+test("redactUrl hides provider tokens in logs", () => {
+  assert.equal(
+    redactUrl("wss://example.robinhood-mainnet.quiknode.pro/secret-token/"),
+    "wss://example.robinhood-mainnet.quiknode.pro/REDACTED/"
+  );
+  assert.equal(
+    redactUrl("https://mainnet.helius-rpc.com/?api-key=secret-token"),
+    "https://mainnet.helius-rpc.com/?api-key=REDACTED"
+  );
 });
