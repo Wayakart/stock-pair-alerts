@@ -279,7 +279,7 @@ async function main() {
   const longEvents = longScan.logs.map(decodeLaunchLog).filter(Boolean);
   const long = applyLongLogs(state, longEvents, {
     rhMap: nextRh,
-    allowAlerts: false,
+    allowAlerts: true,
   });
   if (longScan.scannedTo >= 0n && Number(longScan.scannedTo) > long.longLastBlock) {
     long.longLastBlock = Number(longScan.scannedTo);
