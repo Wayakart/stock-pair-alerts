@@ -45,7 +45,7 @@ Set these Helius values:
 - `WEEKLY_BUDGET_USD=1000`: local weekly budget cap.
 - `BUDGET_CHECK_MS=60000`: minimum time between runtime budget checks.
 
-The Solana listener writes usage estimates into `state/seen.json`. If the weekly estimate reaches the cap, it writes `state/KILL_SWITCH` and exits with code `2`; while that file exists the listener refuses to restart. Delete the file only after intentionally raising/resetting the budget.
+The Solana listener writes usage estimates into `state/budget.json`. If the weekly estimate reaches the cap, it writes `state/KILL_SWITCH` and exits with code `2`; while that file exists the listener refuses to restart. Delete the file only after intentionally raising/resetting the budget.
 
 Also set the Helius dashboard Usage autoscaling limit so the account cannot spend past your intended ceiling. The local kill switch can stop this process from making more requests, but it cannot reverse a monthly plan charge or control other API keys using the same Helius account.
 
