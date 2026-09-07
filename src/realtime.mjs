@@ -548,7 +548,7 @@ async function runConnection({ url, httpUrl, rhCache, tokenCache, hooks, heartbe
     let subscriptionId = "";
     let backfillStarted = false;
     const heartbeatTimer = setInterval(() => {
-      void heartbeat.tick().catch((err) => console.warn("heartbeat failed:", err.message));
+      void heartbeat.tick({ force: true }).catch((err) => console.warn("heartbeat failed:", err.message));
     }, HEARTBEAT_MS).unref();
     const pingTimer = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) ws.ping();

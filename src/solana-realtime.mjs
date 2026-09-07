@@ -295,7 +295,7 @@ async function runWebSocketConnection(context) {
     let settled = false;
     let processing = Promise.resolve();
     const heartbeatTimer = setInterval(() => {
-      void heartbeat.tick().catch((err) => console.warn("heartbeat failed:", err.message));
+      void heartbeat.tick({ force: true }).catch((err) => console.warn("heartbeat failed:", err.message));
     }, HEARTBEAT_MS).unref();
     const pingTimer = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) ws.ping();
@@ -546,7 +546,7 @@ async function runLaserstreamConnection(context) {
 
   logJson("subscribed", { protocol: "pump", streamMode: "laserstream-grpc", fromSlot: fromSlot || null });
   const heartbeatTimer = setInterval(() => {
-    void heartbeat.tick().catch((err) => console.warn("heartbeat failed:", err.message));
+    void heartbeat.tick({ force: true }).catch((err) => console.warn("heartbeat failed:", err.message));
   }, HEARTBEAT_MS);
 
   const shutdown = () => settleTerminal();
