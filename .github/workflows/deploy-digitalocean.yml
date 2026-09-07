@@ -1,0 +1,151 @@
+name: Deploy DigitalOcean realtime listeners
+
+on:
+  workflow_dispatch:
+    inputs:
+      restart_services:
+        description: Restart realtime services after deploy
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare SSH
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.DO_SSH_PRIVATE_KEY }}" > ~/.ssh/stock_pair_do
+          chmod 600 ~/.ssh/stock_pair_do
+          ssh-keyscan -H "${{ secrets.DO_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Sync app
+        run: |
+          set -euo pipefail
+          rsync -az --delete \
+            --exclude '.git' \
+            --exclude 'node_modules' \
+            --exclude 'state/seen.json' \
+            --exclude 'state/KILL_SWITCH' \
+            -e "ssh -i ~/.ssh/stock_pair_do -o IdentitiesOnly=yes" \
+            ./ "root@${{ secrets.DO_HOST }}:/opt/stock-pair-alerts/"
+
+      - name: Write production env
+        run: |
+          set -euo pipefail
+          cat > /tmp/stock-pair-alerts.env <<ENV
+          DISCORD_WEBHOOK_URL=${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL_2=${{ secrets.DISCORD_WEBHOOK_URL_2 }}
+          REALTIME_RPC_WS_URL=${{ secrets.QUICKNODE_ROBINHOOD_WS_URL }}
+          REQUIRE_QUICKNODE_ROBINHOOD=1
+          ALLOW_PUBLIC_ROBINHOOD_RPC=0
+          WATCH_PROTOCOLS=pons,long,flap,pair
+          SOLANA_RPC_HTTP_URL=${{ secrets.HELIUS_RPC_HTTP_URL }}
+          SOLANA_RPC_WS_URL=${{ secrets.HELIUS_RPC_WS_URL }}
+          SOLANA_WATCH_PROTOCOLS=pump
+          SOLANA_STOCK_REFRESH_MS=300000
+          HELIUS_API_KEY=${{ secrets.HELIUS_API_KEY }}
+          HELIUS_PROJECT_ID=${{ secrets.HELIUS_PROJECT_ID }}
+          REQUIRE_HELIUS_BUDGET_API=1
+          HELIUS_MONTHLY_PLAN_USD=499
+          HELIUS_INCLUDED_CREDITS=100000000
+          HELIUS_EXTRA_CREDIT_USD_PER_MILLION=5
+          WEEKLY_BUDGET_USD=1000
+          BUDGET_CHECK_MS=60000
+          INTERESTING_SYMBOLS=${{ secrets.INTERESTING_SYMBOLS }}
+          IGNORE_SYMBOLS=${{ secrets.IGNORE_SYMBOLS }}
+          INTERESTING_ADDRESSES=${{ secrets.INTERESTING_ADDRESSES }}
+          IGNORE_ADDRESSES=${{ secrets.IGNORE_ADDRESSES }}
+          ENV
+          sed -i 's/^          //' /tmp/stock-pair-alerts.env
+          scp -i ~/.ssh/stock_pair_do -o IdentitiesOnly=yes /tmp/stock-pair-alerts.env "root@${{ secrets.DO_HOST }}:/tmp/stock-pair-alerts.env"
+          ssh -i ~/.ssh/stock_pair_do -o IdentitiesOnly=yes "root@${{ secrets.DO_HOST }}" 'install -m 700 -d /etc/stock-pair-alerts && install -m 600 /tmp/stock-pair-alerts.env /etc/stock-pair-alerts/env && rm -f /tmp/stock-pair-alerts.env'
+
+      - name: Install runtime and services
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/stock_pair_do -o IdentitiesOnly=yes "root@${{ secrets.DO_HOST }}" '
+            set -euo pipefail
+            id stockalerts >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin stockalerts
+            mkdir -p /opt/stock-pair-alerts/state /var/lib/stock-pair-alerts /var/log/stock-pair-alerts
+            chown -R stockalerts:stockalerts /opt/stock-pair-alerts/state /var/lib/stock-pair-alerts /var/log/stock-pair-alerts
+            cd /opt/stock-pair-alerts
+            npm ci
+            cat > /etc/systemd/system/stock-pair-robinhood.service <<SERVICE
+          [Unit]
+          Description=Stock Pair Alerts Robinhood realtime listener
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=stockalerts
+          Group=stockalerts
+          WorkingDirectory=/opt/stock-pair-alerts
+          EnvironmentFile=/etc/stock-pair-alerts/env
+          ExecStart=/usr/bin/npm run realtime
+          Restart=always
+          RestartSec=2
+          StateDirectory=stock-pair-alerts
+          LogsDirectory=stock-pair-alerts
+          NoNewPrivileges=true
+          PrivateTmp=true
+          ProtectSystem=strict
+          ProtectHome=true
+          ReadWritePaths=/opt/stock-pair-alerts/state /var/lib/stock-pair-alerts /var/log/stock-pair-alerts
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+            sed -i "s/^          //" /etc/systemd/system/stock-pair-robinhood.service
+            cat > /etc/systemd/system/stock-pair-solana.service <<SERVICE
+          [Unit]
+          Description=Stock Pair Alerts Solana realtime listener
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=stockalerts
+          Group=stockalerts
+          WorkingDirectory=/opt/stock-pair-alerts
+          EnvironmentFile=/etc/stock-pair-alerts/env
+          ExecStart=/usr/bin/npm run solana-realtime
+          Restart=always
+          RestartSec=2
+          RestartPreventExitStatus=2
+          StateDirectory=stock-pair-alerts
+          LogsDirectory=stock-pair-alerts
+          NoNewPrivileges=true
+          PrivateTmp=true
+          ProtectSystem=strict
+          ProtectHome=true
+          ReadWritePaths=/opt/stock-pair-alerts/state /var/lib/stock-pair-alerts /var/log/stock-pair-alerts
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+            sed -i "s/^          //" /etc/systemd/system/stock-pair-solana.service
+            systemctl daemon-reload
+          '
+
+      - name: Verify and optionally restart
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/stock_pair_do -o IdentitiesOnly=yes "root@${{ secrets.DO_HOST }}" '
+            set -euo pipefail
+            cd /opt/stock-pair-alerts
+            npm test
+            if [ "${{ inputs.restart_services }}" = "true" ]; then
+              systemctl enable --now stock-pair-robinhood.service stock-pair-solana.service
+              systemctl restart stock-pair-robinhood.service stock-pair-solana.service
+            fi
+            systemctl --no-pager --full status stock-pair-robinhood.service stock-pair-solana.service || true
+          '

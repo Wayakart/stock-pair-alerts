@@ -4,9 +4,14 @@
   "type": "module",
   "scripts": {
     "watch": "node src/watch.mjs",
+    "realtime": "node src/realtime.mjs",
+    "solana-realtime": "node src/solana-realtime.mjs",
     "test": "node --test"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
   }
 }

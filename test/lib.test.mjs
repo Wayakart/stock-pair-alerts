@@ -3,11 +3,20 @@ import assert from "node:assert/strict";
 import {
   TOPIC0_APPROVAL,
   TOPIC0_LAUNCH,
+  TOPIC0_FLAP_TOKEN_QUOTE_SET,
+  TOPIC0_PAIR_CUSTOM_QUOTE_POOL_CREATED,
   decodeApprovalLog,
   decodeLaunchLog,
+  decodeFlapQuoteSetLog,
+  decodePairCustomQuotePoolLog,
   extractRhAssets,
   applyPonsLogs,
   applyLongLogs,
+  applyFlapQuoteLogs,
+  applyPairPoolLogs,
+  extractStonkfunStockPairs,
+  findPumpStockLaunch,
+  applyPumpStockLaunches,
   isStockNumeraire,
   normalizeAddr,
   USDG,
@@ -20,10 +29,15 @@ import {
   DEFAULT_RPC,
   extractO1Quotes,
   applyO1Quotes,
+  csvSet,
+  isInterestingAsset,
+  isInterestingSolanaAsset,
+  PUMP_PROGRAM,
 } from "../src/lib.mjs";
 
 const nvda = "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC";
 const aapl = "0xaF3D76f1834A1d425780943C99Ea8A608f8a93f9";
+const nvdax = "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh";
 
 const rhMap = {
   [normalizeAddr(nvda)]: { symbol: "NVDA", address: normalizeAddr(nvda) },
@@ -78,6 +92,40 @@ test("decode LaunchCreated numeraire", () => {
   assert.equal(e.block, 32);
 });
 
+test("decode Flap TokenQuoteSet token and quote", () => {
+  const token = "0x3103298cb58d8c28c0841ca73c19be8d0fd57777";
+  const e = decodeFlapQuoteSetLog({
+    topics: [TOPIC0_FLAP_TOKEN_QUOTE_SET],
+    data: "0x" +
+      "000000000000000000000000" + token.slice(2).toLowerCase() +
+      "000000000000000000000000" + nvda.slice(2).toLowerCase(),
+    transactionHash: "0xflap",
+    blockNumber: "0x30",
+  });
+  assert.equal(e.token, normalizeAddr(token));
+  assert.equal(e.quote, normalizeAddr(nvda));
+  assert.equal(e.block, 48);
+});
+
+test("decode Pair Fund CustomQuotePoolCreated project and quote", () => {
+  const project = "0x9a4b94ac36433b0fdefea6ebbabb1ced7e4a5555";
+  const poolId = "0x" + "a".repeat(64);
+  const e = decodePairCustomQuotePoolLog({
+    topics: [
+      TOPIC0_PAIR_CUSTOM_QUOTE_POOL_CREATED,
+      "0x000000000000000000000000" + project.slice(2).toLowerCase(),
+      "0x000000000000000000000000" + nvda.slice(2).toLowerCase(),
+      poolId,
+    ],
+    transactionHash: "0xpair",
+    blockNumber: "0x40",
+  });
+  assert.equal(e.project, normalizeAddr(project));
+  assert.equal(e.quote, normalizeAddr(nvda));
+  assert.equal(e.poolId, poolId);
+  assert.equal(e.block, 64);
+});
+
 test("Long backfill is silent then remembers numeraires", () => {
   const r = applyLongLogs(
     { longNumeraires: [], longLastBlock: 0 },
@@ -106,6 +154,112 @@ test("Long alerts first new stock numeraire once", () => {
   assert.equal(r.alerts.length, 1);
   assert.equal(r.alerts[0].numeraire, ap);
   assert.ok(r.longNumeraires.includes(ap));
+});
+
+test("Flap alerts new Robinhood stock quote pairs once", () => {
+  const token = "0x3103298cb58d8c28c0841ca73c19be8d0fd57777";
+  const nv = normalizeAddr(nvda);
+  const r = applyFlapQuoteLogs(
+    { flapPairs: [], flapLastBlock: 0 },
+    [
+      { token, quote: nv, tx: "0x1", block: 10 },
+      { token, quote: nv, tx: "0x2", block: 11 },
+    ],
+    { rhMap, allowAlerts: true }
+  );
+  assert.equal(r.alerts.length, 1);
+  assert.equal(r.alerts[0].quote, nv);
+  assert.equal(r.flapPairs.length, 1);
+  assert.equal(r.flapLastBlock, 11);
+});
+
+test("Flap ignores non-stock quote assets", () => {
+  const r = applyFlapQuoteLogs(
+    { flapPairs: [], flapLastBlock: 0 },
+    [{ token: "0x3103298cb58d8c28c0841ca73c19be8d0fd57777", quote: WETH, tx: "0x1", block: 10 }],
+    { rhMap, allowAlerts: true }
+  );
+  assert.equal(r.alerts.length, 0);
+  assert.equal(r.flapPairs.length, 1);
+});
+
+test("Pair Fund alerts new Robinhood stock quote pools once", () => {
+  const project = "0x9a4b94ac36433b0fdefea6ebbabb1ced7e4a5555";
+  const poolId = "0x" + "b".repeat(64);
+  const nv = normalizeAddr(nvda);
+  const r = applyPairPoolLogs(
+    { pairPools: [], pairLastBlock: 0 },
+    [
+      { project, quote: nv, poolId, tx: "0x1", block: 10 },
+      { project, quote: nv, poolId, tx: "0x2", block: 11 },
+    ],
+    { rhMap, allowAlerts: true }
+  );
+  assert.equal(r.alerts.length, 1);
+  assert.equal(r.alerts[0].quote, nv);
+  assert.equal(r.pairPools.length, 1);
+  assert.equal(r.pairLastBlock, 11);
+});
+
+test("Pair Fund ignores non-stock quote assets", () => {
+  const r = applyPairPoolLogs(
+    { pairPools: [], pairLastBlock: 0 },
+    [{
+      project: "0x9a4b94ac36433b0fdefea6ebbabb1ced7e4a5555",
+      quote: WETH,
+      poolId: "0x" + "c".repeat(64),
+      tx: "0x1",
+      block: 10,
+    }],
+    { rhMap, allowAlerts: true }
+  );
+  assert.equal(r.alerts.length, 0);
+  assert.equal(r.pairPools.length, 1);
+});
+
+test("StonkFun stock pair extraction keeps Solana stock categories", () => {
+  const pairs = extractStonkfunStockPairs({
+    data: {
+      pairs: [
+        { mint: nvdax, symbol: "NVDAX", name: "NVIDIA", category: "xstock" },
+        { mint: "So11111111111111111111111111111111111111112", symbol: "SOL", category: "solana" },
+      ],
+    },
+  });
+  assert.equal(pairs[nvdax].symbol, "NVDAX");
+  assert.equal(Object.keys(pairs).length, 1);
+});
+
+test("Pump stock launch finder matches stock quote mints in create transactions", () => {
+  const tx = {
+    slot: 123,
+    transaction: {
+      signatures: ["solsig"],
+      message: {
+        accountKeys: [{ pubkey: "creator" }],
+        instructions: [{
+          programId: PUMP_PROGRAM,
+          accounts: ["newMint", nvdax],
+        }],
+      },
+    },
+    meta: { innerInstructions: [] },
+  };
+  const event = findPumpStockLaunch(tx, { [nvdax]: { symbol: "NVDAX" } });
+  assert.equal(event.quoteMint, nvdax);
+  assert.equal(event.signature, "solsig");
+  assert.equal(event.slot, 123);
+});
+
+test("Pump stock launches alert once", () => {
+  const event = { quoteMint: nvdax, signature: "solsig", slot: 123 };
+  const r = applyPumpStockLaunches(
+    { pumpStockLaunches: ["older"] },
+    [event, event],
+    { stockMap: { [nvdax]: { symbol: "NVDAX" } }, allowAlerts: true }
+  );
+  assert.equal(r.alerts.length, 1);
+  assert.deepEqual(r.pumpStockLaunches, ["older", "solsig"]);
 });
 
 test("Long does not alert USDG WETH zero or unknown tokens", () => {
@@ -193,4 +347,47 @@ test("o1 extract skips zero USDG WETH", () => {
   });
   assert.equal(quotes.length, 1);
   assert.equal(quotes[0].symbol, "NVDA");
+});
+
+test("csvSet normalizes comma-separated values", () => {
+  assert.deepEqual([...csvSet(" NVDA, tsla ,, ")], ["nvda", "tsla"]);
+  assert.deepEqual([...csvSet(" nvda, tsla ", { normalize: (v) => v.toUpperCase() })], ["NVDA", "TSLA"]);
+});
+
+test("isInterestingAsset supports symbol and address allowlists", () => {
+  assert.equal(isInterestingAsset({ address: nvda, symbol: "NVDA" }), true);
+  assert.equal(isInterestingAsset(
+    { address: nvda, symbol: "NVDA" },
+    { includeSymbols: new Set(["TSLA"]), includeAddresses: new Set([normalizeAddr(aapl)]) }
+  ), false);
+  assert.equal(isInterestingAsset(
+    { address: nvda, symbol: "NVDA" },
+    { includeSymbols: new Set(["NVDA"]) }
+  ), true);
+  assert.equal(isInterestingAsset(
+    { address: nvda, symbol: "NVDA" },
+    { includeAddresses: new Set([normalizeAddr(nvda)]) }
+  ), true);
+});
+
+test("isInterestingAsset exclude lists override broad alerts", () => {
+  assert.equal(isInterestingAsset(
+    { address: nvda, symbol: "NVDA" },
+    { excludeSymbols: new Set(["NVDA"]) }
+  ), false);
+  assert.equal(isInterestingAsset(
+    { address: nvda, symbol: "NVDA" },
+    { includeSymbols: new Set(["NVDA"]), excludeAddresses: new Set([normalizeAddr(nvda)]) }
+  ), false);
+});
+
+test("isInterestingSolanaAsset preserves case-sensitive mint allowlists", () => {
+  assert.equal(isInterestingSolanaAsset(
+    { address: nvdax, symbol: "NVDAX" },
+    { includeAddresses: new Set([nvdax]) }
+  ), true);
+  assert.equal(isInterestingSolanaAsset(
+    { address: nvdax, symbol: "NVDAX" },
+    { includeAddresses: new Set([nvdax.toLowerCase()]) }
+  ), false);
 });
