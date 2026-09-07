@@ -87,7 +87,7 @@ Budget warnings are sent at 80%, 90%, and 95% of the weekly cap, once per thresh
 
 ### QuickNode Robinhood production setup
 
-Robinhood runs on QuickNode in production. Create a QuickNode Robinhood Chain Mainnet endpoint, copy its WebSocket URL, and set it as `REALTIME_RPC_WS_URL`. The realtime listener subscribes to all enabled protocol logs in one EVM `eth_subscribe` filter and routes matching logs locally, so it receives events as the RPC pushes them instead of polling blocks.
+Robinhood runs on QuickNode in production. Create a QuickNode Robinhood Chain Mainnet endpoint, copy its WebSocket URL, and set it as `REALTIME_RPC_WS_URL`. The realtime listener subscribes to enabled launch protocol logs and Uniswap v4 PoolManager swaps in one EVM `eth_subscribe` filter, then routes matching logs locally. This is push-based rather than polling, but the PoolManager address currently delivers unrelated pools too; use provider telemetry when sizing continuous operation.
 
 Set:
 
@@ -178,6 +178,16 @@ Run current status and spend projection:
 cd /opt/stock-pair-alerts
 npm run status -- --env /etc/stock-pair-alerts/env
 ```
+
+Replay an exact historical Robinhood window through the current momentum rules without posting to Discord or triggering Rick:
+
+```bash
+EVM_REPLAY_RPC_HTTP_URL=https://YOUR-ENDPOINT npm run replay:robinhood -- \
+  2026-09-07T04:40:46.177Z 2026-09-07T12:40:46.177Z \
+  reports/robinhood-signal-replay.json
+```
+
+The replay report includes every candidate pool, normalized trade, first qualification, milestone, and aggregate noise-reduction totals. `REPLAY_RPC_MIN_INTERVAL_MS` defaults to `100` to protect the endpoint from metadata bursts.
 
 Additional protocols should be added only after their contract address, event signature, and "new interesting pair" semantics are verified. Pools.trade, Bags.fm, trench.today, hood.fun, Bankr, Virtuals, and Clanker are candidates, but they need protocol-specific confirmation before enabling alerts.
 
