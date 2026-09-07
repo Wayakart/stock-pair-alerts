@@ -22,7 +22,7 @@ async function loadEnvFile(file) {
 function percentile(values, p) {
   const sorted = [...values].sort((a, b) => a - b);
   if (!sorted.length) return null;
-  const idx = Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1);
+  const idx = Math.max(0, Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1));
   return Number(sorted[idx].toFixed(3));
 }
 

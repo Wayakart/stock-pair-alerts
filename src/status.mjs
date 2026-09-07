@@ -31,8 +31,9 @@ function monthlyToWeek(usd) {
 
 async function main() {
   await loadEnvFile(argValue("--env"));
-  const robinhood = await readJsonFile("state/robinhood.json", {});
-  const solana = await readJsonFile("state/solana.json", {});
+  const legacy = await readJsonFile("state/seen.json", {});
+  const robinhood = await readJsonFile("state/robinhood.json", legacy);
+  const solana = await readJsonFile("state/solana.json", legacy);
   const budgetState = await readJsonFile("state/budget.json", {});
   const heliusUsage = await fetchHeliusUsage({
     apiKey: process.env.HELIUS_API_KEY,

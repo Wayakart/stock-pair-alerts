@@ -360,6 +360,7 @@ async function runConnection({ url, rhCache, hooks, heartbeat, decisionEngine })
   for (const protocol of active) byLogKey.set(routeKey(protocol.address, protocol.topic0), protocol);
 
   await rhCache.get();
+  await writeState(state);
   logJson("listener_start", {
     mode: "realtime",
     url: redactUrl(url),
