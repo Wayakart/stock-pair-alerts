@@ -279,6 +279,16 @@ async function runWebSocketConnection(context) {
     rickAutoScan,
   });
   let nextId = 1;
+  const checkpoint = {
+    slot: Number(state.pumpLastSlot || 0),
+    signature: String(state.pumpLastSignature || ""),
+  };
+  const snapshot = () => ({
+    ...state,
+    pumpLastSlot: checkpoint.slot,
+    pumpLastSignature: checkpoint.signature,
+  });
+  const writer = makeCheckpointWriter(snapshot);
 
   await new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl, { handshakeTimeout: 10_000 });
@@ -322,7 +332,13 @@ async function runWebSocketConnection(context) {
         if (msg.error) throw new Error(JSON.stringify(msg.error));
         const value = msg.params?.result?.value;
         const slot = msg.params?.result?.context?.slot;
-        if (!value || value.err || !isPumpCreateLog(value.logs)) return;
+        if (!value) return;
+        if (Number(slot || 0) >= checkpoint.slot) {
+          checkpoint.slot = Number(slot || 0);
+          checkpoint.signature = value.signature || checkpoint.signature;
+          writer.schedule();
+        }
+        if (value.err || !isPumpCreateLog(value.logs)) return;
         const event = decodePumpCreateEvent(value.logs);
         if (!event) return;
         heartbeat.event();
@@ -337,7 +353,7 @@ async function runWebSocketConnection(context) {
         processing = processing.then(async () => {
           await checkBudgetAndWarn(checkBudget, hooks);
           state = await handlePumpCreate({
-            state,
+            state: snapshot(),
             event,
             signature: value.signature,
             slot,
@@ -348,7 +364,7 @@ async function runWebSocketConnection(context) {
             trace,
             rickAutoScan,
           });
-          await writeState(state);
+          await writer.flush();
           trace.done("handled");
           await heartbeat.tick();
         });
@@ -368,26 +384,35 @@ async function runWebSocketConnection(context) {
     ws.on("error", (err) => console.warn("websocket error:", err.message));
     ws.on("close", (code, reason) => {
       console.warn("websocket closed:", code, reason.toString());
-      void processing.then(() => finish(), (err) => finish(err));
+      void processing
+        .then(() => writer.flush())
+        .then(() => finish(), (err) => finish(err));
     });
   });
 }
 
 function makeCheckpointWriter(getSnapshot) {
   let timer = null;
+  let writing = Promise.resolve();
+
+  function write() {
+    writing = writing.catch(() => {}).then(() => writeState(getSnapshot()));
+    return writing;
+  }
+
   return {
     schedule() {
       if (timer) return;
       timer = setTimeout(() => {
         timer = null;
-        void writeState(getSnapshot()).catch((err) => console.warn("Solana checkpoint write failed:", err.message));
+        void write().catch((err) => console.warn("Solana checkpoint write failed:", err.message));
       }, STATE_FLUSH_MS);
       timer.unref();
     },
     async flush() {
       if (timer) clearTimeout(timer);
       timer = null;
-      await writeState(getSnapshot());
+      await write();
     },
   };
 }
