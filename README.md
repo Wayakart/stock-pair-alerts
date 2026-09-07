@@ -110,7 +110,7 @@ Environment variables:
 - `IGNORE_SYMBOLS`: optional comma-separated ticker blocklist.
 - `INTERESTING_ADDRESSES`: optional comma-separated token-address allowlist.
 - `IGNORE_ADDRESSES`: optional comma-separated token-address blocklist.
-- `EVM_BOOTSTRAP_LOOKBACK_BLOCKS`: silent first-run lookback for newly added Robinhood protocols. Defaults to `50000`.
+- `EVM_BOOTSTRAP_LOOKBACK_BLOCKS`: silent first-run lookback for newly added Robinhood protocols. Defaults to `100000`.
 - `EVM_BACKFILL_OVERLAP_BLOCKS`: overlap applied to every reconnect backfill. Defaults to `32`.
 - `RICK_AUTOSCAN`: when `1`, puts `.x <project CA>` or `.pf <project mint>` in webhook message content. It defaults to `0`; enable it only after Rick's operator approves automated webhook triggers.
 
