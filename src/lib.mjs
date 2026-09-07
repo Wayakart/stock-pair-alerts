@@ -433,6 +433,21 @@ export function buildSolanaEmbed({ platform, symbol, name, address, tx, extra })
   };
 }
 
+export function buildStatusEmbed({ title, level = "info", service, message, fields = [] }) {
+  const colors = { info: 0x3498db, warn: 0xf1c40f, error: 0xe74c3c };
+  const out = {
+    title,
+    color: colors[level] || colors.info,
+    fields: [
+      { name: "Service", value: service || "stock-pair-alerts", inline: true },
+      { name: "Message", value: message || "-", inline: false },
+      ...fields,
+    ],
+    timestamp: new Date().toISOString(),
+  };
+  return out;
+}
+
 export function emptyState() {
   return {
     initialized: false,

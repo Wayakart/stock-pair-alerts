@@ -71,6 +71,26 @@ test("budget guard refuses to start when manual kill switch exists", async () =>
   });
 });
 
+test("budget guard reports warning thresholds once", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "stock-pair-alerts-budget-"));
+  const statePath = path.join(dir, "budget.json");
+  const killSwitchPath = path.join(dir, "KILL_SWITCH");
+
+  await withEnv({
+    WEEKLY_BUDGET_USD: "1000",
+    HELIUS_MONTHLY_PLAN_USD: "850",
+    HELIUS_API_KEY: "",
+    HELIUS_PROJECT_ID: "",
+    REQUIRE_HELIUS_BUDGET_API: "",
+  }, async () => {
+    const guard = await createBudgetGuard({ statePath, killSwitchPath });
+    const first = await guard.check();
+    const second = await guard.check();
+    assert.equal(first.crossedThreshold, 0.8);
+    assert.equal(second.crossedThreshold, undefined);
+  });
+});
+
 test("isBudgetStopError recognizes fatal budget stops", () => {
   assert.equal(isBudgetStopError(new Error("weekly budget exceeded: $1000")), true);
   assert.equal(isBudgetStopError(new Error("kill switch active: state/KILL_SWITCH")), true);

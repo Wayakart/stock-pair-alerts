@@ -6,6 +6,7 @@ const DEFAULT_PLAN_USD = 499;
 const DEFAULT_INCLUDED_CREDITS = 100_000_000;
 const DEFAULT_EXTRA_CREDIT_USD_PER_MILLION = 5;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const BUDGET_WARNING_THRESHOLDS = [0.8, 0.9, 0.95];
 
 function numEnv(name, fallback) {
   const raw = process.env[name];
@@ -104,6 +105,7 @@ export async function createBudgetGuard({ statePath, killSwitchPath, now = () =>
       if (Number.isFinite(startedMs) && now() - startedMs >= WEEK_MS) {
         nextBudget.weekStartedAt = new Date(now()).toISOString();
         nextBudget.localUsdSpent = 0;
+        nextBudget.warnedThresholds = [];
       }
 
       const localUsdSpent = Number(nextBudget.localUsdSpent || 0);
@@ -119,6 +121,11 @@ export async function createBudgetGuard({ statePath, killSwitchPath, now = () =>
       }
 
       const estimatedUsd = heliusUsd + localUsdSpent;
+      const warnedThresholds = new Set((nextBudget.warnedThresholds || []).map(String));
+      const crossedThreshold = BUDGET_WARNING_THRESHOLDS.find((threshold) => {
+        return estimatedUsd >= budgetUsd * threshold && !warnedThresholds.has(String(threshold));
+      });
+      if (crossedThreshold) warnedThresholds.add(String(crossedThreshold));
       nextBudget.weeklyBudgetUsd = budgetUsd;
       nextBudget.heliusEstimatedUsd = heliusUsd;
       nextBudget.localUsdSpent = localUsdSpent;
@@ -126,6 +133,7 @@ export async function createBudgetGuard({ statePath, killSwitchPath, now = () =>
       nextBudget.lastCheckedAt = new Date(now()).toISOString();
       nextBudget.heliusCreditsUsed = heliusUsage?.creditsUsed;
       nextBudget.heliusCreditsRemaining = heliusUsage?.creditsRemaining;
+      nextBudget.warnedThresholds = [...warnedThresholds];
       state.budget = nextBudget;
       await writeJson(statePath, state);
 
@@ -145,7 +153,7 @@ export async function createBudgetGuard({ statePath, killSwitchPath, now = () =>
           },
         }));
       }
-      return nextBudget;
+      return { ...nextBudget, crossedThreshold };
     },
   };
 }
