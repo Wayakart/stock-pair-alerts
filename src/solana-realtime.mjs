@@ -21,6 +21,7 @@ import {
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const statePath = path.join(root, "state", "seen.json");
+const budgetStatePath = path.join(root, "state", "budget.json");
 const killSwitchPath = path.join(root, "state", "KILL_SWITCH");
 const UA = "stock-pair-alerts/1.5";
 const DEFAULT_SOLANA_RPC_HTTP = "https://api.mainnet-beta.solana.com";
@@ -294,7 +295,7 @@ async function main() {
   const wsUrl = solanaWsUrlFromEnv();
   const hooks = webhooksFromEnv();
   const stockCache = makeStockCache();
-  const budgetGuard = await createBudgetGuard({ statePath, killSwitchPath });
+  const budgetGuard = await createBudgetGuard({ statePath: budgetStatePath, killSwitchPath });
   let attempt = 0;
   for (;;) {
     try {
