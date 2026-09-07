@@ -656,6 +656,7 @@ async function runConnection({ url, httpUrl, rhCache, tokenCache, hooks, heartbe
     });
 
     ws.on("ping", () => ws.pong());
+    ws.on("pong", () => heartbeat.message());
     ws.on("error", (err) => console.warn("websocket error:", err.message));
     ws.on("close", (code, reason) => {
       console.warn("websocket closed:", code, reason.toString());
