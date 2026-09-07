@@ -1,19 +1,29 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import bs58 from "bs58";
 import {
   TOPIC0_APPROVAL,
   TOPIC0_LAUNCH,
   TOPIC0_FLAP_TOKEN_QUOTE_SET,
   TOPIC0_PAIR_CUSTOM_QUOTE_POOL_CREATED,
+  TOPIC0_PAIR_CANONICAL_POOL_LAUNCHED,
+  TOPIC0_PAIR_CANONICAL_PROJECT_LAUNCHED,
+  PUMP_CREATE_EVENT_DISCRIMINATOR,
   decodeApprovalLog,
   decodeLaunchLog,
   decodeFlapQuoteSetLog,
   decodePairCustomQuotePoolLog,
+  decodePairCanonicalPoolLog,
+  decodePairCanonicalProjectLog,
+  decodePumpCreateEvent,
+  isPumpCreateLog,
+  decodeAbiString,
   extractRhAssets,
   applyPonsLogs,
   applyLongLogs,
   applyFlapQuoteLogs,
   applyPairPoolLogs,
+  applyPairLaunches,
   extractStonkfunStockPairs,
   findPumpStockLaunch,
   applyPumpStockLaunches,
@@ -34,6 +44,7 @@ import {
   isInterestingSolanaAsset,
   PUMP_PROGRAM,
   redactUrl,
+  buildDiscordAlertPayload,
 } from "../src/lib.mjs";
 
 const nvda = "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC";
@@ -140,21 +151,73 @@ test("Long backfill is silent then remembers numeraires", () => {
   assert.equal(r.longNumeraires.length, 2);
 });
 
-test("Long alerts first new stock numeraire once", () => {
+test("Long alerts every distinct launch even when the stock repeats", () => {
   const nv = normalizeAddr(nvda);
   const ap = normalizeAddr(aapl);
   const r = applyLongLogs(
-    { longNumeraires: [nv], longLastBlock: 10 },
+    { longLaunches: ["0x1"], longNumeraires: [nv], longLastBlock: 10 },
     [
       { numeraire: nv, tx: "0x1", block: 11 },
+      { numeraire: ap, tx: "0x2", block: 12 },
       { numeraire: ap, tx: "0x2", block: 12 },
       { numeraire: ap, tx: "0x3", block: 13 },
     ],
     { rhMap, allowAlerts: true }
   );
-  assert.equal(r.alerts.length, 1);
+  assert.equal(r.alerts.length, 2);
   assert.equal(r.alerts[0].numeraire, ap);
   assert.ok(r.longNumeraires.includes(ap));
+  assert.deepEqual(r.longLaunches, ["0x1", "0x2", "0x3"]);
+});
+
+test("decode Pair Fund project launch from the current coordinator", () => {
+  const project = "0x7eedbb9174b4b1b203f27f8d6a270743039f5555";
+  const creator = "0x129f3e63aa27f340346ebf1ae75f354c87745ce0";
+  const vault = "0x05ced8494d968a0566c7e1359b7b22afb647b37f";
+  const event = decodePairCanonicalProjectLog({
+    topics: [
+      TOPIC0_PAIR_CANONICAL_PROJECT_LAUNCHED,
+      "0x000000000000000000000000" + project.slice(2),
+      "0x000000000000000000000000" + creator.slice(2),
+      "0x000000000000000000000000" + vault.slice(2),
+    ],
+    transactionHash: "0xpairlaunch",
+    blockNumber: "0x35f888f",
+  });
+  assert.equal(event.project, project);
+  assert.equal(event.creator, creator);
+  assert.equal(event.tx, "0xpairlaunch");
+});
+
+test("decode Pair Fund canonical pool quote and pool id", () => {
+  const project = "0x7eedbb9174b4b1b203f27f8d6a270743039f5555";
+  const vault = "0x05ced8494d968a0566c7e1359b7b22afb647b37f";
+  const poolId = "0x" + "a".repeat(64);
+  const event = decodePairCanonicalPoolLog({
+    topics: [
+      TOPIC0_PAIR_CANONICAL_POOL_LAUNCHED,
+      "0x000000000000000000000000" + project.slice(2),
+      "0x000000000000000000000000" + vault.slice(2),
+      "0x000000000000000000000000" + nvda.slice(2).toLowerCase(),
+    ],
+    data: poolId + "0".repeat(64 * 4),
+    transactionHash: "0xpairlaunch",
+    blockNumber: "0x35f888f",
+  });
+  assert.equal(event.project, project);
+  assert.equal(event.quote, normalizeAddr(nvda));
+  assert.equal(event.poolId, poolId);
+});
+
+test("Pair Fund deduplicates one project alert per launch transaction", () => {
+  const event = {
+    project: "0x7eedbb9174b4b1b203f27f8d6a270743039f5555",
+    tx: "0xpairlaunch",
+    block: 42,
+  };
+  const result = applyPairLaunches({ pairLaunches: [], pairLastBlock: 0 }, [event, event], { allowAlerts: true });
+  assert.equal(result.alerts.length, 1);
+  assert.deepEqual(result.pairLaunches, ["0xpairlaunch"]);
 });
 
 test("Flap alerts new Robinhood stock quote pairs once", () => {
@@ -247,9 +310,104 @@ test("Pump stock launch finder matches stock quote mints in create transactions"
     meta: { innerInstructions: [] },
   };
   const event = findPumpStockLaunch(tx, { [nvdax]: { symbol: "NVDAX" } });
+  assert.equal(event.mint, "newMint");
   assert.equal(event.quoteMint, nvdax);
   assert.equal(event.signature, "solsig");
   assert.equal(event.slot, 123);
+});
+
+function u32(value) {
+  const out = Buffer.alloc(4);
+  out.writeUInt32LE(value);
+  return out;
+}
+
+function u64(value) {
+  const out = Buffer.alloc(8);
+  out.writeBigUInt64LE(BigInt(value));
+  return out;
+}
+
+function borshString(value) {
+  const bytes = Buffer.from(value);
+  return Buffer.concat([u32(bytes.length), bytes]);
+}
+
+test("Pump CreateV2 CreateEvent decodes project ticker, mint, and quote mint directly", () => {
+  const mint = "So11111111111111111111111111111111111111112";
+  const tokenProgram = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+  const bytes = Buffer.concat([
+    PUMP_CREATE_EVENT_DISCRIMINATOR,
+    borshString("Stock Rocket"),
+    borshString("ROCKET"),
+    borshString("https://example.com/meta.json"),
+    bs58.decode(mint),
+    bs58.decode(nvdax),
+    bs58.decode(mint),
+    bs58.decode(nvdax),
+    u64(123),
+    u64(1),
+    u64(2),
+    u64(3),
+    u64(4),
+    bs58.decode(tokenProgram),
+    Buffer.from([0, 1]),
+    bs58.decode(nvdax),
+    u64(5),
+  ]);
+  const event = decodePumpCreateEvent([
+    "Program log: Instruction: CreateV2",
+    "Program data: " + bytes.toString("base64"),
+  ]);
+  assert.equal(event.name, "Stock Rocket");
+  assert.equal(event.symbol, "ROCKET");
+  assert.equal(event.mint, mint);
+  assert.equal(event.quoteMint, nvdax);
+  assert.equal(event.isCashbackEnabled, true);
+  assert.equal(isPumpCreateLog(["Program log: Instruction: CreateV2"]), true);
+  assert.equal(isPumpCreateLog(["Program log: Instruction: Buy"]), false);
+});
+
+test("ABI string decoder handles dynamic ERC20 metadata", () => {
+  const text = Buffer.from("AIRE");
+  const encoded = Buffer.concat([
+    Buffer.alloc(31), Buffer.from([32]),
+    Buffer.alloc(31), Buffer.from([text.length]),
+    text, Buffer.alloc(32 - text.length),
+  ]);
+  assert.equal(decodeAbiString("0x" + encoded.toString("hex")), "AIRE");
+});
+
+test("Discord alert displays the project CA and keeps Rick automation opt-in", () => {
+  const project = "0x7eedbb9174b4b1b203f27f8d6a270743039f5555";
+  const alert = {
+    chain: "robinhood",
+    platform: "Pair",
+    projectAddress: project,
+    projectSymbol: "AIRE",
+    projectName: "AI RESERVE",
+    quotes: [{ address: normalizeAddr(nvda), symbol: "NVDA" }],
+    tx: "0x1234567890",
+  };
+  const manual = buildDiscordAlertPayload(alert);
+  assert.equal(manual.content, undefined);
+  assert.match(manual.embeds[0].title, /\$AIRE/);
+  assert.equal(manual.embeds[0].fields[2].value, "`" + project + "`");
+  assert.match(manual.embeds[0].fields.find((field) => field.name === "Paired with").value, /NVDA/);
+
+  const automatic = buildDiscordAlertPayload(alert, { rickAutoScan: true });
+  assert.equal(automatic.content, ".x " + project);
+});
+
+test("Solana alerts use Rick's pump scan command", () => {
+  const payload = buildDiscordAlertPayload({
+    chain: "solana",
+    platform: "Pump.fun",
+    projectAddress: nvdax,
+    projectSymbol: "NVDAXPAIR",
+    quotes: [],
+  }, { rickAutoScan: true });
+  assert.equal(payload.content, ".pf " + nvdax);
 });
 
 test("Pump stock launches alert once", () => {

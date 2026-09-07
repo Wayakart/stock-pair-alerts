@@ -52,6 +52,7 @@ export function estimateHeliusUsd(usage, {
   includedCredits = DEFAULT_INCLUDED_CREDITS,
   extraCreditUsdPerMillion = DEFAULT_EXTRA_CREDIT_USD_PER_MILLION,
 } = {}) {
+  if (String(usage?.subscriptionDetails?.plan || "").toLowerCase() === "free") return 0;
   const creditsUsed = Number(usage?.creditsUsed || 0);
   const included = Number(usage?.subscriptionDetails?.creditsLimit || includedCredits);
   const overageCredits = Math.max(0, creditsUsed - included);
@@ -84,6 +85,8 @@ export async function createBudgetGuard({ statePath, killSwitchPath, now = () =>
     "HELIUS_EXTRA_CREDIT_USD_PER_MILLION",
     DEFAULT_EXTRA_CREDIT_USD_PER_MILLION
   );
+  const quicknodeMonthlyUsd = numEnv("QUICKNODE_MONTHLY_PLAN_USD", 0);
+  const digitalOceanMonthlyUsd = numEnv("DIGITALOCEAN_MONTHLY_USD", 0);
   const requireHeliusBudgetApi = boolEnv("REQUIRE_HELIUS_BUDGET_API");
   const apiKey = process.env.HELIUS_API_KEY;
   const projectId = process.env.HELIUS_PROJECT_ID;
@@ -120,7 +123,8 @@ export async function createBudgetGuard({ statePath, killSwitchPath, now = () =>
         });
       }
 
-      const estimatedUsd = heliusUsd + localUsdSpent;
+      const fixedProviderUsd = quicknodeMonthlyUsd + digitalOceanMonthlyUsd;
+      const estimatedUsd = heliusUsd + fixedProviderUsd + localUsdSpent;
       const warnedThresholds = new Set((nextBudget.warnedThresholds || []).map(String));
       const crossedThreshold = BUDGET_WARNING_THRESHOLDS.find((threshold) => {
         return estimatedUsd >= budgetUsd * threshold && !warnedThresholds.has(String(threshold));
@@ -128,6 +132,9 @@ export async function createBudgetGuard({ statePath, killSwitchPath, now = () =>
       if (crossedThreshold) warnedThresholds.add(String(crossedThreshold));
       nextBudget.weeklyBudgetUsd = budgetUsd;
       nextBudget.heliusEstimatedUsd = heliusUsd;
+      nextBudget.quicknodeEstimatedUsd = quicknodeMonthlyUsd;
+      nextBudget.digitalOceanEstimatedUsd = digitalOceanMonthlyUsd;
+      nextBudget.fixedProviderUsd = fixedProviderUsd;
       nextBudget.localUsdSpent = localUsdSpent;
       nextBudget.estimatedUsd = estimatedUsd;
       nextBudget.lastCheckedAt = new Date(now()).toISOString();
@@ -148,6 +155,7 @@ export async function createBudgetGuard({ statePath, killSwitchPath, now = () =>
             estimatedUsd,
             weeklyBudgetUsd: budgetUsd,
             heliusEstimatedUsd: heliusUsd,
+            fixedProviderUsd,
             localUsdSpent,
             heliusCreditsUsed: heliusUsage?.creditsUsed,
           },

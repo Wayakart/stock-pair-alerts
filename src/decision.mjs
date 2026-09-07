@@ -16,11 +16,14 @@ export function createDryRunDecisionEngine({
   return {
     async evaluate(alert, context = {}) {
       if (!enabled) return null;
+      const projectAddress = alert.projectAddress || alert.address;
+      const projectSymbol = alert.projectSymbol || alert.symbol || null;
       const decision = {
         action: "would_buy",
         platform: alert.platform,
-        symbol: alert.symbol || null,
-        address: alert.address,
+        symbol: projectSymbol,
+        address: projectAddress,
+        quoteSymbols: (alert.quotes || []).map((quote) => quote.symbol).filter(Boolean),
         tx: alert.tx,
         maxUsd,
         maxSlippageBps,

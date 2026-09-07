@@ -33,6 +33,33 @@ test("estimateHeliusUsd includes plan plus credit overage", () => {
   assert.equal(usd, 749);
 });
 
+test("estimateHeliusUsd treats a reported free plan as zero spend", () => {
+  const usd = estimateHeliusUsd(
+    { creditsUsed: 32_057, subscriptionDetails: { creditsLimit: 1_000_000, plan: "free" } },
+    { planUsd: 499, extraCreditUsdPerMillion: 5 }
+  );
+  assert.equal(usd, 0);
+});
+
+test("budget guard includes configured infrastructure commitments", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "stock-pair-alerts-budget-"));
+  const statePath = path.join(dir, "budget.json");
+  const killSwitchPath = path.join(dir, "KILL_SWITCH");
+
+  await withEnv({
+    WEEKLY_BUDGET_USD: "1000",
+    HELIUS_MONTHLY_PLAN_USD: "0",
+    QUICKNODE_MONTHLY_PLAN_USD: "750",
+    DIGITALOCEAN_MONTHLY_USD: "250",
+    HELIUS_API_KEY: "",
+    HELIUS_PROJECT_ID: "",
+    REQUIRE_HELIUS_BUDGET_API: "",
+  }, async () => {
+    const guard = await createBudgetGuard({ statePath, killSwitchPath });
+    await assert.rejects(() => guard.check(), /weekly budget exceeded/);
+  });
+});
+
 test("budget guard writes kill switch at the weekly cap", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "stock-pair-alerts-budget-"));
   const statePath = path.join(dir, "seen.json");

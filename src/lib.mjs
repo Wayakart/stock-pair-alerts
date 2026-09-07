@@ -1,3 +1,5 @@
+import bs58 from "bs58";
+
 export const PONS_FACTORY = "0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e";
 export const TOPIC0_APPROVAL =
   "0x060d1992d069dc524985f328329aae36102a017c59733c5c91fc0691ee0703b6";
@@ -8,8 +10,14 @@ export const FLAP_ROUTER = "0x26605f322f7ff986f381bb9a6e3f5dab0beaeb09";
 export const TOPIC0_FLAP_TOKEN_QUOTE_SET =
   "0x3ceb902d3c555c21c3415b6aa839104b18e4825b2f8324011ff979089a507a8c";
 export const PAIR_LAUNCHPAD = "0x8660a7f019c7943b0b0a91b8e39aff3b6db6ae62";
+export const PAIR_COORDINATOR = "0xf98b202fd8717b79f9c5e5dd67c2f9e640bbd25d";
+export const PAIR_POOL_MANAGER = "0x8366a39cc670b4001a1121b8f6a443a643e40951";
 export const TOPIC0_PAIR_CUSTOM_QUOTE_POOL_CREATED =
   "0xc1b1fb8d1b8316a5e3daeabb1eb94809ff0aae6bf9f8527dda4f5404ec11a100";
+export const TOPIC0_PAIR_CANONICAL_POOL_LAUNCHED =
+  "0xc559f6b695e21adfebe603206dc072989e931f9ade0683fda629d167476e6cdd";
+export const TOPIC0_PAIR_CANONICAL_PROJECT_LAUNCHED =
+  "0x8aae1ddb61bb894868f4b1a037b2a84d5f25e02118d13a83e11eb3ebbeb9f076";
 export const LONG_START_BLOCK = 8636038;
 export const RH_ASSETS_URL = "https://api.robinhood.com/rhj/assets";
 export const O1_CATALOG_URL = "https://docs.o1.exchange/launchpad/reference/robinhood-stock-quotes.json";
@@ -24,6 +32,7 @@ export const WETH = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
 export const ZERO = "0x0000000000000000000000000000000000000000";
 export const PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 export const STONKFUN_PAIRS_URL = "https://www.stonkfun.xyz/api/public/v1/pairs?launchable=true";
+export const PUMP_CREATE_EVENT_DISCRIMINATOR = Buffer.from([27, 114, 169, 77, 222, 235, 99, 118]);
 
 export function logsRpcUrl(rpcUrl, defaultRpc) {
   return /alchemy\.com/i.test(String(rpcUrl || "")) ? defaultRpc : rpcUrl;
@@ -138,6 +147,35 @@ export function decodePairCustomQuotePoolLog(log) {
   };
 }
 
+export function decodePairCanonicalProjectLog(log) {
+  const topics = log.topics || [];
+  if (topics.length < 4) return null;
+  if (String(topics[0]).toLowerCase() !== TOPIC0_PAIR_CANONICAL_PROJECT_LAUNCHED) return null;
+  return {
+    project: normalizeAddr("0x" + String(topics[1]).slice(-40)),
+    creator: normalizeAddr("0x" + String(topics[2]).slice(-40)),
+    vault: normalizeAddr("0x" + String(topics[3]).slice(-40)),
+    tx: log.transactionHash,
+    block: Number(hexToBigInt(log.blockNumber)),
+  };
+}
+
+export function decodePairCanonicalPoolLog(log) {
+  const topics = log.topics || [];
+  if (topics.length < 4) return null;
+  if (String(topics[0]).toLowerCase() !== TOPIC0_PAIR_CANONICAL_POOL_LAUNCHED) return null;
+  const data = String(log.data || "0x").replace(/^0x/, "");
+  if (data.length < 64) return null;
+  return {
+    project: normalizeAddr("0x" + String(topics[1]).slice(-40)),
+    vault: normalizeAddr("0x" + String(topics[2]).slice(-40)),
+    quote: normalizeAddr("0x" + String(topics[3]).slice(-40)),
+    poolId: "0x" + data.slice(0, 64).toLowerCase(),
+    tx: log.transactionHash,
+    block: Number(hexToBigInt(log.blockNumber)),
+  };
+}
+
 export function isStockNumeraire(addr, rhMap) {
   const a = normalizeAddr(addr);
   if (!a || a === ZERO || a === USDG || a === WETH) return false;
@@ -227,17 +265,117 @@ export function solanaAccountKeys(tx) {
   return keys;
 }
 
+function pumpInstructions(tx) {
+  const out = [];
+  for (const ix of tx?.transaction?.message?.instructions || []) out.push(ix);
+  for (const group of tx?.meta?.innerInstructions || []) {
+    for (const ix of group.instructions || []) out.push(ix);
+  }
+  return out.filter((ix) => {
+    const program = typeof ix?.programId === "string" ? ix.programId : ix?.programId?.toString?.();
+    return program === PUMP_PROGRAM;
+  });
+}
+
 export function findPumpStockLaunch(tx, stockMap) {
   const keys = solanaAccountKeys(tx);
   if (!keys.has(PUMP_PROGRAM)) return null;
   const hit = [...keys].find((k) => stockMap && stockMap[k]);
   if (!hit) return null;
+  const instruction = pumpInstructions(tx)[0];
+  const mintAccount = instruction?.accounts?.[0];
+  const mint = typeof mintAccount === "string" ? mintAccount : mintAccount?.pubkey;
   const sig = tx?.transaction?.signatures?.[0];
   return {
+    mint: mint || "",
     quoteMint: hit,
     signature: sig,
     slot: tx?.slot || 0,
   };
+}
+
+class BorshReader {
+  constructor(buffer) {
+    this.buffer = buffer;
+    this.offset = 0;
+  }
+
+  take(size) {
+    if (!Number.isSafeInteger(size) || size < 0 || this.offset + size > this.buffer.length) {
+      throw new Error("Pump CreateEvent data is truncated");
+    }
+    const value = this.buffer.subarray(this.offset, this.offset + size);
+    this.offset += size;
+    return value;
+  }
+
+  u32() {
+    return this.take(4).readUInt32LE(0);
+  }
+
+  u64() {
+    return this.take(8).readBigUInt64LE(0);
+  }
+
+  i64() {
+    return this.take(8).readBigInt64LE(0);
+  }
+
+  bool() {
+    return this.take(1)[0] !== 0;
+  }
+
+  string() {
+    return this.take(this.u32()).toString("utf8");
+  }
+
+  pubkey() {
+    return bs58.encode(this.take(32));
+  }
+}
+
+export function decodePumpCreateEvent(logs) {
+  for (const line of logs || []) {
+    const match = String(line).match(/^Program data:\s*([A-Za-z0-9+/=]+)\s*$/);
+    if (!match) continue;
+    let data;
+    try {
+      data = Buffer.from(match[1], "base64");
+    } catch {
+      continue;
+    }
+    if (data.length < 8 || !data.subarray(0, 8).equals(PUMP_CREATE_EVENT_DISCRIMINATOR)) continue;
+    try {
+      const reader = new BorshReader(data.subarray(8));
+      const event = {
+        name: reader.string(),
+        symbol: reader.string(),
+        uri: reader.string(),
+        mint: reader.pubkey(),
+        bondingCurve: reader.pubkey(),
+        user: reader.pubkey(),
+        creator: reader.pubkey(),
+        timestamp: reader.i64(),
+        virtualTokenReserves: reader.u64(),
+        virtualSolReserves: reader.u64(),
+        realTokenReserves: reader.u64(),
+        tokenTotalSupply: reader.u64(),
+        tokenProgram: reader.pubkey(),
+        isMayhemMode: reader.bool(),
+        isCashbackEnabled: reader.bool(),
+        quoteMint: reader.pubkey(),
+        virtualQuoteReserves: reader.u64(),
+      };
+      return event;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+export function isPumpCreateLog(logs) {
+  return (logs || []).some((line) => /Instruction:\s*Create(?:V2)?\b/i.test(line));
 }
 
 export function applyPumpStockLaunches(state, events, { stockMap, allowAlerts } = {}) {
@@ -298,7 +436,7 @@ export function applyO1Quotes(state, quotes) {
   return { o1Quotes: [...seen], alerts };
 }
 
-export function applyPonsLogs(state, events) {
+export function applyPonsLogs(state, events, { allowAlerts = state.initialized } = {}) {
   const approved = new Set((state.ponsApproved || []).map(normalizeAddr));
   let lastBlock = state.ponsLastBlock || 0;
   const alerts = [];
@@ -308,7 +446,7 @@ export function applyPonsLogs(state, events) {
     if (e.approved) {
       const isNew = !approved.has(e.pairToken);
       approved.add(e.pairToken);
-      if (isNew && state.initialized) alerts.push(e);
+      if (isNew && allowAlerts) alerts.push(e);
     } else {
       approved.delete(e.pairToken);
     }
@@ -321,7 +459,8 @@ export function applyPonsLogs(state, events) {
 }
 
 export function applyLongLogs(state, events, { rhMap, allowAlerts } = {}) {
-  const seen = new Set((state.longNumeraires || []).map(normalizeAddr));
+  const seen = new Set((state.longLaunches || []).map((v) => String(v).toLowerCase()));
+  const numeraires = new Set((state.longNumeraires || []).map(normalizeAddr));
   let lastBlock = state.longLastBlock || 0;
   const alerts = [];
   const sorted = [...events].sort((a, b) => a.block - b.block);
@@ -329,12 +468,15 @@ export function applyLongLogs(state, events, { rhMap, allowAlerts } = {}) {
     if (e.block > lastBlock) lastBlock = e.block;
     const addr = normalizeAddr(e.numeraire);
     if (!addr) continue;
-    const isNew = !seen.has(addr);
-    seen.add(addr);
+    const launchKey = String(e.tx || (e.poolOrHook + ":" + e.asset + ":" + addr)).toLowerCase();
+    const isNew = !seen.has(launchKey);
+    seen.add(launchKey);
+    numeraires.add(addr);
     if (isNew && allowAlerts && isStockNumeraire(addr, rhMap)) alerts.push(e);
   }
   return {
-    longNumeraires: [...seen],
+    longLaunches: [...seen],
+    longNumeraires: [...numeraires],
     longLastBlock: lastBlock,
     alerts,
   };
@@ -385,13 +527,80 @@ export function applyPairPoolLogs(state, events, { rhMap, allowAlerts } = {}) {
   };
 }
 
-export function buildEmbed({ platform, symbol, name, address, tx, extra }) {
+export function applyPairLaunches(state, events, { allowAlerts } = {}) {
+  const seen = new Set((state.pairLaunches || []).map((v) => String(v).toLowerCase()));
+  let lastBlock = state.pairLastBlock || 0;
+  const alerts = [];
+  const sorted = [...events].sort((a, b) => a.block - b.block);
+  for (const event of sorted) {
+    if (event.block > lastBlock) lastBlock = event.block;
+    const project = normalizeAddr(event.project);
+    const key = String(event.tx || project).toLowerCase();
+    if (!project || !key || seen.has(key)) continue;
+    seen.add(key);
+    if (allowAlerts) alerts.push(event);
+  }
+  return { pairLaunches: [...seen], pairLastBlock: lastBlock, alerts };
+}
+
+export function decodeAbiString(hex) {
+  const raw = String(hex || "").replace(/^0x/, "");
+  if (!raw || raw.length % 2 !== 0) return "";
+  const data = Buffer.from(raw, "hex");
+  try {
+    if (data.length >= 64) {
+      const offset = Number(BigInt("0x" + data.subarray(0, 32).toString("hex")));
+      if (Number.isSafeInteger(offset) && offset >= 0 && offset + 32 <= data.length) {
+        const length = Number(BigInt("0x" + data.subarray(offset, offset + 32).toString("hex")));
+        if (Number.isSafeInteger(length) && length >= 0 && offset + 32 + length <= data.length) {
+          return data.subarray(offset + 32, offset + 32 + length).toString("utf8").replace(/\0/g, "").trim();
+        }
+      }
+    }
+    return data.subarray(0, 32).toString("utf8").replace(/\0/g, "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function alertProject(alert) {
+  return {
+    address: alert.projectAddress || alert.address || "",
+    symbol: alert.projectSymbol || alert.symbol || "",
+    name: alert.projectName || alert.name || "",
+  };
+}
+
+export function rickScanCommand(alert) {
+  const project = alertProject(alert);
+  if (!project.address) return "";
+  return alert.chain === "solana" || alert.platform === "Pump.fun"
+    ? ".pf " + project.address
+    : ".x " + project.address;
+}
+
+export function buildEmbed(alert) {
+  const { platform, tx, extra } = alert;
+  const project = alertProject(alert);
+  const quotes = Array.isArray(alert.quotes) ? alert.quotes.filter(Boolean) : [];
   const fields = [
     { name: "Platform", value: platform, inline: true },
-    { name: "Ticker", value: symbol || "?", inline: true },
-    { name: "Address", value: "`" + address + "`", inline: false },
+    { name: "New token", value: project.symbol ? "$" + project.symbol : "Unknown", inline: true },
+    { name: "Contract address", value: "`" + project.address + "`", inline: false },
   ];
-  if (name) fields.push({ name: "Name", value: name, inline: false });
+  if (project.name) fields.push({ name: "Name", value: project.name, inline: false });
+  if (quotes.length) {
+    fields.push({
+      name: "Paired with",
+      value: quotes.map((quote) => quote.symbol || quote.name || quote.address).join(" | ").slice(0, 1024),
+      inline: false,
+    });
+    fields.push({
+      name: "Quote contracts",
+      value: quotes.map((quote) => (quote.symbol ? quote.symbol + ": " : "") + "`" + quote.address + "`").join("\n").slice(0, 1024),
+      inline: false,
+    });
+  }
   if (tx) {
     fields.push({
       name: "Tx",
@@ -399,23 +608,40 @@ export function buildEmbed({ platform, symbol, name, address, tx, extra }) {
       inline: false,
     });
   }
+  const scan = rickScanCommand(alert);
+  if (scan) fields.push({ name: "Rick scan", value: "`" + scan + "`", inline: false });
   if (extra) fields.push({ name: "Note", value: extra, inline: false });
   return {
-    title: platform + " listed " + (symbol || "a new pair stock"),
-    url: EXPLORER + "/address/" + address,
+    title: platform + " " + (alert.verb || "launched") + " " + (project.symbol ? "$" + project.symbol : "a new token"),
+    url: EXPLORER + "/address/" + project.address,
     color: platform === "Pons" ? 0x6c5ce7 : platform === "01" ? 0xf39c12 : 0x00b894,
     fields,
     timestamp: new Date().toISOString(),
   };
 }
 
-export function buildSolanaEmbed({ platform, symbol, name, address, tx, extra }) {
+export function buildSolanaEmbed(alert) {
+  const { platform, tx, extra } = alert;
+  const project = alertProject(alert);
+  const quotes = Array.isArray(alert.quotes) ? alert.quotes.filter(Boolean) : [];
   const fields = [
     { name: "Platform", value: platform, inline: true },
-    { name: "Ticker", value: symbol || "?", inline: true },
-    { name: "Mint", value: "`" + address + "`", inline: false },
+    { name: "New token", value: project.symbol ? "$" + project.symbol : "Unknown", inline: true },
+    { name: "Mint / CA", value: "`" + project.address + "`", inline: false },
   ];
-  if (name) fields.push({ name: "Name", value: name, inline: false });
+  if (project.name) fields.push({ name: "Name", value: project.name, inline: false });
+  if (quotes.length) {
+    fields.push({
+      name: "Paired with",
+      value: quotes.map((quote) => quote.symbol || quote.name || quote.address).join(" | ").slice(0, 1024),
+      inline: false,
+    });
+    fields.push({
+      name: "Quote mints",
+      value: quotes.map((quote) => (quote.symbol ? quote.symbol + ": " : "") + "`" + quote.address + "`").join("\n").slice(0, 1024),
+      inline: false,
+    });
+  }
   if (tx) {
     fields.push({
       name: "Tx",
@@ -423,14 +649,23 @@ export function buildSolanaEmbed({ platform, symbol, name, address, tx, extra })
       inline: false,
     });
   }
+  const scan = rickScanCommand(alert);
+  if (scan) fields.push({ name: "Rick scan", value: "`" + scan + "`", inline: false });
   if (extra) fields.push({ name: "Note", value: extra, inline: false });
   return {
-    title: platform + " referenced " + (symbol || "a stock mint"),
-    url: SOLANA_EXPLORER + "/token/" + address,
+    title: platform + " launched " + (project.symbol ? "$" + project.symbol : "a new token"),
+    url: SOLANA_EXPLORER + "/token/" + project.address,
     color: 0x14f195,
     fields,
     timestamp: new Date().toISOString(),
   };
+}
+
+export function buildDiscordAlertPayload(alert, { rickAutoScan = false } = {}) {
+  const embed = alert.chain === "solana" ? buildSolanaEmbed(alert) : buildEmbed(alert);
+  const payload = { username: "stock pair alerts", embeds: [embed] };
+  if (rickAutoScan) payload.content = rickScanCommand(alert);
+  return payload;
 }
 
 export function buildStatusEmbed({ title, level = "info", service, message, fields = [] }) {
@@ -450,17 +685,22 @@ export function buildStatusEmbed({ title, level = "info", service, message, fiel
 
 export function emptyState() {
   return {
+    stateVersion: 2,
     initialized: false,
     ponsLastBlock: 0,
     ponsApproved: [],
     longLastBlock: 0,
+    longLaunches: [],
     longNumeraires: [],
     longReady: false,
     flapLastBlock: 0,
     flapPairs: [],
     pairLastBlock: 0,
+    pairLaunches: [],
     pairPools: [],
     pumpStockLaunches: [],
+    pumpLastSlot: 0,
+    pumpLastSignature: "",
     o1Quotes: [],
     rhAssets: {},
   };

@@ -42,7 +42,11 @@ async function main() {
 
   const quicknodeMonthlyUsd = numEnv("QUICKNODE_MONTHLY_PLAN_USD", 249);
   const digitalOceanMonthlyUsd = numEnv("DIGITALOCEAN_MONTHLY_USD", 6);
-  const heliusMonthlyUsd = numEnv("HELIUS_MONTHLY_PLAN_USD", 499);
+  const configuredHeliusMonthlyUsd = numEnv("HELIUS_MONTHLY_PLAN_USD", 499);
+  const heliusMonthlyUsd = String(heliusUsage?.subscriptionDetails?.plan || "").toLowerCase() === "free"
+    ? 0
+    : configuredHeliusMonthlyUsd;
+  const monthlyCommittedUsd = quicknodeMonthlyUsd + digitalOceanMonthlyUsd + heliusMonthlyUsd;
   const weeklyFixedUsd =
     monthlyToWeek(quicknodeMonthlyUsd) +
     monthlyToWeek(digitalOceanMonthlyUsd) +
@@ -59,8 +63,10 @@ async function main() {
     checkedAt: new Date().toISOString(),
     listings: {
       ponsApproved: robinhood.ponsApproved?.length || 0,
+      longLaunches: robinhood.longLaunches?.length || 0,
       longNumeraires: robinhood.longNumeraires?.length || 0,
       flapPairs: robinhood.flapPairs?.length || 0,
+      pairLaunches: robinhood.pairLaunches?.length || 0,
       pairPools: robinhood.pairPools?.length || 0,
       pumpStockLaunches: solana.pumpStockLaunches?.length || 0,
     },
@@ -75,6 +81,7 @@ async function main() {
       quicknodeMonthlyUsd,
       heliusMonthlyUsd,
       digitalOceanMonthlyUsd,
+      monthlyCommittedUsd,
       weeklyFixedUsd: Number(weeklyFixedUsd.toFixed(2)),
       note: "Fixed weekly projection is monthly plan costs annualized to one week; provider bills may charge monthly upfront.",
     },
