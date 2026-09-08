@@ -5,6 +5,7 @@ import {
   TOPIC0_UNISWAP_V4_SWAP,
   UNISWAP_V4_POOL_MANAGER,
   aggregateV4Swaps,
+  buildV4SwapLogFilter,
   createMomentumCandidate,
   decodeV4InitializeLog,
   estimateFdvUsd,
@@ -93,6 +94,19 @@ test("decodes Initialize and finds the project/stock pool", () => {
   assert.equal(decoded.currency1, quote);
   assert.equal(decoded.sqrtPriceX96, q96);
   assert.deepEqual(findCandidatePools({ logs: [log] }, project, [quote]), [decoded]);
+});
+
+test("builds a PoolManager swap filter scoped to active pool ids", () => {
+  const secondPoolId = "0x" + "b".repeat(64);
+  assert.equal(buildV4SwapLogFilter([]), null);
+  assert.deepEqual(buildV4SwapLogFilter([poolId]), {
+    address: UNISWAP_V4_POOL_MANAGER,
+    topics: [TOPIC0_UNISWAP_V4_SWAP, poolId],
+  });
+  assert.deepEqual(buildV4SwapLogFilter([secondPoolId, poolId.toUpperCase(), secondPoolId]), {
+    address: UNISWAP_V4_POOL_MANAGER,
+    topics: [TOPIC0_UNISWAP_V4_SWAP, [poolId, secondPoolId]],
+  });
 });
 
 test("aggregates every matching swap log in one transaction and preserves signed deltas", () => {

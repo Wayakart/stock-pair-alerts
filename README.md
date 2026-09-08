@@ -87,7 +87,7 @@ Budget warnings are sent at 80%, 90%, and 95% of the weekly cap, once per thresh
 
 ### QuickNode Robinhood production setup
 
-Robinhood runs on QuickNode in production. Create a QuickNode Robinhood Chain Mainnet endpoint, copy its WebSocket URL, and set it as `REALTIME_RPC_WS_URL`. The realtime listener subscribes to enabled launch protocol logs and Uniswap v4 PoolManager swaps in one EVM `eth_subscribe` filter, then routes matching logs locally. This is push-based rather than polling, but the PoolManager address currently delivers unrelated pools too; use provider telemetry when sizing continuous operation.
+Robinhood runs on QuickNode in production. Create a QuickNode Robinhood Chain Mainnet endpoint, copy its WebSocket URL, and set it as `REALTIME_RPC_WS_URL`. The realtime listener keeps one subscription for enabled launch protocols and a second, dynamically replaced subscription whose topic filter contains only active candidate pool IDs. The previous pool subscription remains active until QuickNode acknowledges its replacement, then a filtered overlap backfill closes the handoff gap.
 
 Set:
 
@@ -117,6 +117,7 @@ Environment variables:
 - `MOMENTUM_WHALE_BUY_VOLUME_USD`: standalone early buy-volume trigger. Defaults to `5000`.
 - `MOMENTUM_MIN_BUNDLE_BUYERS`: same-block unique-buyer trigger. Defaults to `3`.
 - `MOMENTUM_WALLET_FALLBACK_BUYERS`: wallet trigger used only when the USD price is unavailable. Defaults to `5`.
+- `MOMENTUM_SUBSCRIPTION_REFRESH_MS`: candidate expiry and pool-subscription reconciliation interval. Defaults to `30000`.
 - `MOMENTUM_HISTORY_PATH`: optional override for the append-only NDJSON history path.
 - `SOLANA_RPC_HTTP_URL`: paid Solana HTTP RPC URL used for provider access and operational recovery. Pump create alerts decode directly from stream logs on the hot path.
 - `SOLANA_RPC_WS_URL`: paid Solana WebSocket RPC URL for Pump program logs. Required for production.

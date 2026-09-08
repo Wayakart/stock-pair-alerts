@@ -40,12 +40,14 @@ import {
   DEFAULT_MOMENTUM_THRESHOLDS,
   TOPIC0_UNISWAP_V4_SWAP,
   aggregateV4Swaps,
+  buildV4SwapLogFilter,
   createMomentumCandidate,
   findCandidatePools,
   normalizePoolTrade,
   recordCandidateTrade,
 } from "./momentum.mjs";
 import { createHeartbeat, createLatencyTrace, logJson, msSince, warnJson } from "./metrics.mjs";
+import { createRhPriceCache } from "./rh-price-cache.mjs";
 import { appendJsonLine, readJsonFile, writeJsonFile } from "./state.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -63,6 +65,7 @@ const STALE_CONNECTION_MS = Number(process.env.STALE_CONNECTION_MS || 180_000);
 const BACKFILL_CHUNK = BigInt(process.env.EVM_BACKFILL_CHUNK || 2_000);
 const BACKFILL_OVERLAP_BLOCKS = BigInt(process.env.EVM_BACKFILL_OVERLAP_BLOCKS || 32);
 const BOOTSTRAP_LOOKBACK_BLOCKS = BigInt(process.env.EVM_BOOTSTRAP_LOOKBACK_BLOCKS || 100_000);
+const MOMENTUM_SUBSCRIPTION_REFRESH_MS = Math.max(1_000, Number(process.env.MOMENTUM_SUBSCRIPTION_REFRESH_MS || 30_000));
 const ERC20_NAME_SELECTOR = "0x06fdde03";
 const ERC20_SYMBOL_SELECTOR = "0x95d89b41";
 const ERC20_TOTAL_SUPPLY_SELECTOR = "0x18160ddd";
@@ -194,9 +197,23 @@ async function httpJson(url, opts = {}) {
   try {
     body = text ? JSON.parse(text) : null;
   } catch {
-    throw new Error((opts.method || "GET") + " " + redactUrl(url) + " -> " + res.status + " non-json");
+    const error = new Error((opts.method || "GET") + " " + redactUrl(url) + " -> " + res.status + " non-json");
+    error.status = res.status;
+    throw error;
   }
-  if (!res.ok) throw new Error((opts.method || "GET") + " " + redactUrl(url) + " -> " + res.status);
+  if (!res.ok) {
+    const error = new Error((opts.method || "GET") + " " + redactUrl(url) + " -> " + res.status);
+    error.status = res.status;
+    const retryAfter = res.headers.get("retry-after");
+    if (retryAfter) {
+      const seconds = Number(retryAfter);
+      const dateMs = Date.parse(retryAfter);
+      error.retryAfterMs = Number.isFinite(seconds)
+        ? seconds * 1_000
+        : Number.isFinite(dateMs) ? Math.max(0, dateMs - Date.now()) : 0;
+    }
+    throw error;
+  }
   return body;
 }
 
@@ -228,6 +245,25 @@ async function evmRpcBatch(url, calls) {
     const response = byId.get(item.id);
     return response && !response.error ? response.result : null;
   });
+}
+
+async function loadSwapTransaction(httpUrl, tx) {
+  let lastError = new Error("Swap transaction details are not available yet");
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      const [transaction, receipt] = await evmRpcBatch(httpUrl, [
+        { method: "eth_getTransactionByHash", params: [tx] },
+        { method: "eth_getTransactionReceipt", params: [tx] },
+      ]);
+      const buyer = transaction?.from || receipt?.from;
+      if (receipt && buyer) return { buyer, receipt };
+      lastError = new Error("Swap transaction details are not available yet");
+    } catch (err) {
+      lastError = err;
+    }
+    if (attempt < 5) await sleep(Math.min(2_000, 100 * 2 ** (attempt - 1)));
+  }
+  throw lastError;
 }
 
 function discordEndpoint(raw, { wait = false, messageId = "" } = {}) {
@@ -344,65 +380,6 @@ function makeTokenMetadataCache(httpUrl) {
       }
       if (metadata.symbol || metadata.name || metadata.totalSupply !== "0") values.set(key, metadata);
       return metadata;
-    },
-  };
-}
-
-function makeRhPriceCache() {
-  const values = new Map();
-  const retryAfter = new Map();
-  const pending = new Map();
-
-  function quoteValue(quote, asset) {
-    const bid = Number(quote?.bid);
-    const ask = Number(quote?.ask);
-    const rawPrice = bid > 0 && ask > 0 ? (bid + ask) / 2 : bid > 0 ? bid : ask;
-    const multiplier = Number(asset?.currentMultiplier || 1);
-    const value = Number.isFinite(rawPrice) && rawPrice > 0 ? rawPrice * multiplier : null;
-    return Number.isFinite(value) && value > 0 ? value : null;
-  }
-
-  async function refresh(asset) {
-    const symbol = String(asset?.symbol || "").toUpperCase();
-    try {
-      const payload = await httpJson(RH_PRICES_URL + encodeURIComponent(symbol));
-      const quote = payload?.quotes?.[0] || payload?.quote || payload;
-      const value = quoteValue(quote, asset);
-      values.set(symbol, { value, fetchedAt: Date.now() });
-      retryAfter.delete(symbol);
-      return value;
-    } catch (err) {
-      retryAfter.set(symbol, Date.now() + 15_000);
-      warnJson("rh_price_unavailable", { symbol, error: err.message });
-      return values.get(symbol)?.value ?? null;
-    } finally {
-      pending.delete(symbol);
-    }
-  }
-
-  return {
-    async get(asset) {
-      const symbol = String(asset?.symbol || "").toUpperCase();
-      if (!symbol) return null;
-      const cached = values.get(symbol);
-      if (cached && Date.now() - cached.fetchedAt < 15_000) return cached.value;
-      if (Date.now() < (retryAfter.get(symbol) || 0)) return cached?.value ?? null;
-      if (!pending.has(symbol)) pending.set(symbol, refresh(asset));
-      return cached?.value ?? null;
-    },
-    async prime(assets) {
-      try {
-        const bySymbol = new Map((assets || []).map((asset) => [String(asset.symbol || "").toUpperCase(), asset]));
-        const payload = await httpJson(RH_ALL_PRICES_URL);
-        for (const quote of payload?.quotes || []) {
-          const symbol = String(quote.tokenSymbol || quote.symbol || "").toUpperCase();
-          const asset = bySymbol.get(symbol);
-          if (!asset) continue;
-          values.set(symbol, { value: quoteValue(quote, asset), fetchedAt: Date.now() });
-        }
-      } catch (err) {
-        warnJson("rh_price_prime_unavailable", { error: err.message });
-      }
     },
   };
 }
@@ -550,11 +527,7 @@ async function handleMomentumLog(context) {
     candidates[poolId] = candidate;
   }
 
-  const [transaction, receipt] = await evmRpcBatch(httpUrl, [
-    { method: "eth_getTransactionByHash", params: [log.transactionHash] },
-    { method: "eth_getTransactionReceipt", params: [log.transactionHash] },
-  ]);
-  if (!transaction || !receipt) throw new Error("Swap transaction details are not available yet");
+  const { buyer, receipt } = await loadSwapTransaction(httpUrl, log.transactionHash);
   const aggregate = aggregateV4Swaps(receipt.logs, poolId);
   if (!aggregate) return state;
   if (aggregate.tx === candidate.launchTx) {
@@ -572,7 +545,7 @@ async function handleMomentumLog(context) {
 
   const quoteUsd = await rhPriceCache.get(candidate.quote);
   const trade = normalizePoolTrade(candidate, aggregate, {
-    buyer: transaction.from,
+    buyer,
     timestampMs,
     quoteUsd,
   });
@@ -838,15 +811,15 @@ async function processLog(context) {
   return context.state;
 }
 
-async function getLogsRange(httpUrl, protocol, fromBlock, toBlock) {
+async function getLogsRange(httpUrl, protocol, fromBlock, toBlock, filter = {}) {
   const logs = [];
   for (let start = fromBlock; start <= toBlock; start += BACKFILL_CHUNK) {
     const end = start + BACKFILL_CHUNK - 1n > toBlock ? toBlock : start + BACKFILL_CHUNK - 1n;
     const page = await evmRpc(httpUrl, "eth_getLogs", [{
-      address: protocol.address,
+      address: filter.address || protocol.address,
       fromBlock: toHex(start),
       toBlock: toHex(end),
-      topics: [protocol.topic0],
+      topics: filter.topics || [protocol.topic0],
     }]);
     logs.push(...(page || []));
   }
@@ -896,7 +869,7 @@ async function runBackfill(context) {
   return context.state;
 }
 
-async function runMomentumBackfill(context, latest) {
+async function runMomentumBackfill(context, latest, { fromBlock: requestedFromBlock } = {}) {
   const nowMs = Date.now();
   context.state.momentumCandidates = pruneMomentumCandidates(
     context.state,
@@ -910,10 +883,12 @@ async function runMomentumBackfill(context, latest) {
   }
   const checkpoint = BigInt(context.state.momentumLastBlock || 0);
   const oldestLaunch = BigInt(Math.min(...candidates.map((candidate) => Number(candidate.launchBlock || latest))));
-  const fromBlock = checkpoint === 0n
+  const checkpointFromBlock = checkpoint === 0n
     ? oldestLaunch
     : (checkpoint >= BACKFILL_OVERLAP_BLOCKS ? checkpoint - BACKFILL_OVERLAP_BLOCKS + 1n : 0n);
-  const logs = await getLogsRange(context.httpUrl, momentumProtocol, fromBlock, latest);
+  const fromBlock = requestedFromBlock === undefined ? checkpointFromBlock : BigInt(requestedFromBlock);
+  const filter = buildV4SwapLogFilter(candidates.map((candidate) => candidate.poolId));
+  const logs = await getLogsRange(context.httpUrl, momentumProtocol, fromBlock, latest, filter);
   for (const log of logs) {
     const poolId = String(log.topics?.[1] || "").toLowerCase();
     if (!context.state.momentumCandidates?.[poolId]) continue;
@@ -995,8 +970,6 @@ async function runConnection({
   const active = protocols.filter((protocol) => enabledProtocols.has(protocol.id));
   if (!active.length) throw new Error("No protocols enabled. Set WATCH_PROTOCOLS=pons,long,flap,pair or add a protocol id.");
   for (const protocol of active) byLogKey.set(routeKey(protocol.address, protocol.topic0), protocol);
-  byLogKey.set(routeKey(momentumProtocol.address, momentumProtocol.topic0), momentumProtocol);
-  const subscriptionProtocols = [...active, momentumProtocol];
 
   await checkBudgetAndWarn(() => checkBudget({ force: true }), hooks);
   const rhMap = await rhCache.get();
@@ -1016,9 +989,14 @@ async function runConnection({
   await new Promise((resolve, reject) => {
     const ws = new WebSocket(url, { handshakeTimeout: 10_000 });
     let settled = false;
-    let subscriptionId = "";
+    let launchSubscriptionId = "";
+    let momentumSubscription = null;
+    let pendingMomentumSubscription = null;
     let backfillStarted = false;
+    let momentumCaughtUp = false;
     let budgetCheckRunning = false;
+    const requests = new Map();
+    const subscriptions = new Map();
     const heartbeatTimer = setInterval(() => {
       void heartbeat.tick({ force: true }).catch((err) => console.warn("heartbeat failed:", err.message));
     }, HEARTBEAT_MS).unref();
@@ -1038,6 +1016,24 @@ async function runConnection({
           budgetCheckRunning = false;
         });
     }, BUDGET_CHECK_MS).unref();
+    const priceTimer = setInterval(() => {
+      void rhCache.get()
+        .then((assets) => rhPriceCache.prime(Object.values(assets), { force: true }))
+        .catch((err) => console.warn("price refresh failed:", err.message));
+    }, RH_REFRESH_MS).unref();
+    const momentumTimer = setInterval(() => {
+      if (settled) return;
+      enqueue(async () => {
+        const before = Object.keys(state.momentumCandidates || {}).sort();
+        const candidates = pruneMomentumCandidates(state, Date.now(), momentumThresholds.trackingWindowMs);
+        const after = Object.keys(candidates).sort();
+        if (samePoolIds(before, after)) return;
+        state = { ...state, momentumCandidates: candidates };
+        await writeState(state);
+        logJson("momentum_candidates_pruned", { removed: before.length - after.length, remaining: after.length });
+        reconcileMomentumSubscription();
+      });
+    }, MOMENTUM_SUBSCRIPTION_REFRESH_MS).unref();
 
     function finish(err) {
       if (settled) return;
@@ -1045,6 +1041,8 @@ async function runConnection({
       clearInterval(heartbeatTimer);
       clearInterval(pingTimer);
       clearInterval(budgetTimer);
+      clearInterval(priceTimer);
+      clearInterval(momentumTimer);
       try { ws.close(); } catch {}
       err ? reject(err) : resolve();
     }
@@ -1058,17 +1056,163 @@ async function runConnection({
       });
     }
 
+    function samePoolIds(left, right) {
+      return left.length === right.length && left.every((value, index) => value === right[index]);
+    }
+
+    function sendRequest(method, params, request) {
+      if (ws.readyState !== WebSocket.OPEN) return null;
+      const id = nextId++;
+      requests.set(id, request);
+      ws.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+      return id;
+    }
+
+    function unsubscribe(subscription, reason) {
+      if (!subscription?.id) return;
+      subscriptions.delete(subscription.id);
+      sendRequest("eth_unsubscribe", [subscription.id], {
+        kind: "unsubscribe",
+        subscriptionId: subscription.id,
+      });
+      logJson("unsubscribed", { kind: subscription.kind, pools: subscription.poolIds?.length || 0, reason });
+    }
+
+    function desiredMomentumPoolIds() {
+      return Object.keys(state.momentumCandidates || {}).map((poolId) => poolId.toLowerCase()).sort();
+    }
+
+    function reconcileMomentumSubscription() {
+      if (settled || ws.readyState !== WebSocket.OPEN || !backfillStarted) return;
+      const poolIds = desiredMomentumPoolIds();
+      if (pendingMomentumSubscription) return;
+      if (momentumSubscription && samePoolIds(momentumSubscription.poolIds, poolIds)) return;
+      if (!poolIds.length) {
+        if (momentumSubscription) unsubscribe(momentumSubscription, "no_active_candidates");
+        momentumSubscription = null;
+        return;
+      }
+      const filter = buildV4SwapLogFilter(poolIds);
+      const subscribedPoolIds = new Set(momentumSubscription?.poolIds || []);
+      const addedCandidates = poolIds
+        .filter((poolId) => !subscribedPoolIds.has(poolId))
+        .map((poolId) => state.momentumCandidates?.[poolId])
+        .filter(Boolean);
+      const checkpointFromBlock = Math.max(
+        0,
+        Number(state.momentumLastBlock || 0) - Number(BACKFILL_OVERLAP_BLOCKS) + 1
+      );
+      const backfillFromBlock = !momentumSubscription && momentumCaughtUp
+        ? checkpointFromBlock
+        : addedCandidates.length
+          ? Math.min(...addedCandidates.map((candidate) => Number(candidate.launchBlock || 0)))
+          : null;
+      const requestId = sendRequest("eth_subscribe", ["logs", filter], {
+        kind: "momentum_subscribe",
+        poolIds,
+        backfillFromBlock,
+      });
+      if (requestId) {
+        pendingMomentumSubscription = { requestId, poolIds };
+        logJson("momentum_subscription_requested", { pools: poolIds.length });
+      }
+    }
+
+    function processingContext(extra = {}) {
+      return {
+        state,
+        active,
+        httpUrl,
+        rhCache,
+        rhPriceCache,
+        tokenCache,
+        hooks,
+        heartbeat,
+        decisionEngine,
+        rickAutoScan,
+        momentumThresholds,
+        ...extra,
+      };
+    }
+
+    function responseError(request, error) {
+      if (request.kind === "momentum_subscribe") pendingMomentumSubscription = null;
+      if (request.kind === "unsubscribe") {
+        warnJson("unsubscribe_failed", { subscription: request.subscriptionId, error });
+        return;
+      }
+      finish(new Error(request.kind + " " + JSON.stringify(error)));
+    }
+
+    function handleResponse(msg) {
+      const request = requests.get(msg.id);
+      if (!request) return false;
+      requests.delete(msg.id);
+      if (msg.error) {
+        responseError(request, msg.error);
+        return true;
+      }
+      if (request.kind === "unsubscribe") return true;
+      const subscriptionId = String(msg.result || "");
+      if (!subscriptionId) {
+        responseError(request, { message: "missing subscription id" });
+        return true;
+      }
+      if (request.kind === "launch_subscribe") {
+        launchSubscriptionId = subscriptionId;
+        subscriptions.set(subscriptionId, { id: subscriptionId, kind: "launch" });
+        logJson("subscribed", {
+          kind: "launch",
+          protocols: active.map((protocol) => protocol.id),
+          subscription: subscriptionId,
+        });
+        if (!backfillStarted) {
+          backfillStarted = true;
+          enqueue(async () => {
+            state = await runBackfill(processingContext());
+            momentumCaughtUp = true;
+            reconcileMomentumSubscription();
+          });
+        }
+        return true;
+      }
+      if (request.kind === "momentum_subscribe") {
+        const previous = momentumSubscription;
+        pendingMomentumSubscription = null;
+        momentumSubscription = {
+          id: subscriptionId,
+          kind: "momentum",
+          poolIds: request.poolIds,
+        };
+        subscriptions.set(subscriptionId, momentumSubscription);
+        if (previous?.id !== subscriptionId) unsubscribe(previous, "replaced");
+        logJson("subscribed", {
+          kind: "momentum",
+          pools: request.poolIds.length,
+          subscription: subscriptionId,
+        });
+        if (request.backfillFromBlock !== null) {
+          enqueue(async () => {
+            const latest = hexToBigInt(await evmRpc(httpUrl, "eth_blockNumber", []));
+            state = await runMomentumBackfill(processingContext(), latest, {
+              fromBlock: request.backfillFromBlock,
+            });
+            await writeState(state);
+            reconcileMomentumSubscription();
+          });
+        }
+        reconcileMomentumSubscription();
+        return true;
+      }
+      return false;
+    }
+
     ws.on("open", () => {
       void heartbeat.tick({ force: true }).catch((err) => console.warn("heartbeat failed:", err.message));
-      ws.send(JSON.stringify({
-        jsonrpc: "2.0",
-        id: nextId++,
-        method: "eth_subscribe",
-        params: ["logs", {
-          address: [...new Set(subscriptionProtocols.map((protocol) => protocol.address))],
-          topics: [[...new Set(subscriptionProtocols.map((protocol) => protocol.topic0))]],
-        }],
-      }));
+      sendRequest("eth_subscribe", ["logs", {
+        address: [...new Set(active.map((protocol) => protocol.address))],
+        topics: [[...new Set(active.map((protocol) => protocol.topic0))]],
+      }], { kind: "launch_subscribe" });
     });
 
     ws.on("message", (data) => {
@@ -1077,33 +1221,20 @@ async function runConnection({
       const observedAtMs = Date.now();
       try {
         const msg = JSON.parse(String(data));
-        if (msg.id && msg.result) {
-          subscriptionId = msg.result;
-          console.log(JSON.stringify({ subscribed: subscriptionProtocols.map((protocol) => protocol.id), subscription: subscriptionId }));
-          if (!backfillStarted) {
-            backfillStarted = true;
-            enqueue(async () => {
-              state = await runBackfill({
-                state,
-                active,
-                httpUrl,
-                rhCache,
-                rhPriceCache,
-                tokenCache,
-                hooks,
-                heartbeat,
-                decisionEngine,
-                rickAutoScan,
-                momentumThresholds,
-              });
-            });
-          }
-          return;
-        }
+        if (msg.id !== undefined && handleResponse(msg)) return;
         if (msg.error) throw new Error(JSON.stringify(msg.error));
         const log = msg.params?.result;
-        if (!log || msg.params?.subscription !== subscriptionId) return;
-        const protocol = byLogKey.get(routeKey(log.address, log.topics?.[0]));
+        const subscription = subscriptions.get(msg.params?.subscription);
+        if (!log || !subscription) return;
+        let protocol;
+        if (subscription.kind === "launch") {
+          if (msg.params.subscription !== launchSubscriptionId) return;
+          protocol = byLogKey.get(routeKey(log.address, log.topics?.[0]));
+        } else {
+          const poolId = String(log.topics?.[1] || "").toLowerCase();
+          if (!subscription.poolIds.includes(poolId)) return;
+          protocol = momentumProtocol;
+        }
         if (!protocol) return;
         heartbeat.event();
         const trace = createLatencyTrace({
@@ -1137,6 +1268,7 @@ async function runConnection({
               state = nextState;
               await writeState(state);
             }
+            reconcileMomentumSubscription();
             trace.done("handled");
             await heartbeat.tick();
           } catch (err) {
@@ -1165,7 +1297,12 @@ async function main() {
   const httpUrl = httpUrlFromEnv(url);
   const hooks = webhooksFromEnv();
   const rhCache = makeRhCache();
-  const rhPriceCache = makeRhPriceCache();
+  const rhPriceCache = createRhPriceCache({
+    requestJson: httpJson,
+    pricesUrl: RH_PRICES_URL,
+    allPricesUrl: RH_ALL_PRICES_URL,
+    warn: warnJson,
+  });
   const tokenCache = makeTokenMetadataCache(httpUrl);
   const budgetGuard = await createBudgetGuard({ statePath: budgetStatePath, killSwitchPath });
   const checkBudget = makeBudgetChecker(budgetGuard);

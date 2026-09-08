@@ -6,6 +6,15 @@ export const TOPIC0_UNISWAP_V4_INITIALIZE =
 export const TOPIC0_UNISWAP_V4_SWAP =
   "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f";
 
+export function buildV4SwapLogFilter(poolIds) {
+  const normalized = [...new Set((poolIds || []).map((poolId) => String(poolId || "").toLowerCase()).filter(Boolean))].sort();
+  if (!normalized.length) return null;
+  return {
+    address: UNISWAP_V4_POOL_MANAGER,
+    topics: [TOPIC0_UNISWAP_V4_SWAP, normalized.length === 1 ? normalized[0] : normalized],
+  };
+}
+
 export const DEFAULT_MOMENTUM_THRESHOLDS = Object.freeze({
   earlyWindowMs: 60_000,
   trackingWindowMs: 3_600_000,
