@@ -393,6 +393,10 @@ test("Discord alert displays the project CA and keeps Rick automation opt-in", (
       reasons: ["early buyer momentum"],
       uniqueBuyers: 4,
       buyVolumeUsd: 2500,
+      netBuyVolumeUsd: 2000,
+      sellToBuyPercent: 20,
+      buyBlockCount: 4,
+      followThroughBuyers: 2,
       ageSeconds: 18.5,
       estimatedFdvUsd: 50000,
       maxSameBlockBuyers: 3,
@@ -408,6 +412,8 @@ test("Discord alert displays the project CA and keeps Rick automation opt-in", (
   assert.match(manual.embeds[0].fields.find((field) => field.name === "Paired with").value, /NVDA/);
   assert.equal(manual.embeds[0].fields.find((field) => field.name === "Unique buyers").value, "4");
   assert.equal(manual.embeds[0].fields.find((field) => field.name === "Buy volume").value, "$2,500");
+  assert.equal(manual.embeds[0].fields.find((field) => field.name === "Follow-through").value, "2 new buyers / 4 blocks");
+  assert.equal(manual.embeds[0].fields.find((field) => field.name === "Net buy flow").value, "$2,000 / 20% sold");
 
   const automatic = buildDiscordAlertPayload(alert, { rickAutoScan: true });
   assert.equal(automatic.content, ".x " + project);

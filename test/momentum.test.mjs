@@ -130,23 +130,49 @@ test("aggregates every matching swap log in one transaction and preserves signed
   assert.equal(trade.volumeUsd, 500);
 });
 
-test("qualifies early momentum and exposes coordinated same-block buys", () => {
+test("qualifies early momentum only after organic buyers follow through across blocks", () => {
   let current = candidate({ sqrtPriceX96: q96 / 128n });
   let result;
-  for (let index = 1; index <= 3; index++) {
-    result = recordCandidateTrade(current, buyTrade(index, { sqrtPriceX96: q96 / 128n }));
+  for (let index = 1; index <= 5; index++) {
+    result = recordCandidateTrade(current, buyTrade(index, {
+      block: index <= 2 ? 101 : 100 + index,
+      sqrtPriceX96: q96 / 128n,
+    }));
     current = result.candidate;
   }
   assert.equal(result.shouldNotify, true);
-  assert.equal(result.metrics.uniqueBuyers, 3);
-  assert.equal(result.metrics.buyVolumeUsd, 1500);
-  assert.equal(result.metrics.maxSameBlockBuyers, 3);
+  assert.equal(result.metrics.uniqueBuyers, 5);
+  assert.equal(result.metrics.buyVolumeUsd, 2500);
+  assert.equal(result.metrics.buyBlockCount, 4);
+  assert.equal(result.metrics.followThroughBuyers, 3);
+  assert.equal(result.metrics.maxSameBlockBuyers, 2);
   assert.ok(result.reasons.includes("early buyer momentum"));
-  assert.ok(result.reasons.includes("coordinated same-block buys"));
   assert.deepEqual(result.newMilestones, []);
 
-  const duplicate = recordCandidateTrade(current, buyTrade(3));
+  const duplicate = recordCandidateTrade(current, buyTrade(5));
   assert.equal(duplicate.duplicate, true);
+});
+
+test("does not qualify a repeated launch bundle without new-wallet follow-through", () => {
+  let current = candidate({ sqrtPriceX96: q96 / 128n });
+  let result;
+  for (let index = 1; index <= 4; index++) {
+    result = recordCandidateTrade(current, buyTrade(index, { block: 101 }));
+    current = result.candidate;
+  }
+  for (let index = 1; index <= 4; index++) {
+    result = recordCandidateTrade(current, {
+      ...buyTrade(index, { block: 102, timestampMs: 1_011_000 }),
+      tx: "0xrepeat" + index,
+    });
+    current = result.candidate;
+  }
+  assert.equal(result.metrics.uniqueBuyers, 4);
+  assert.equal(result.metrics.buyBlockCount, 2);
+  assert.equal(result.metrics.followThroughBuyers, 0);
+  assert.equal(result.metrics.maxSameBlockBuyers, 4);
+  assert.equal(result.shouldNotify, false);
+  assert.deepEqual(result.reasons, []);
 });
 
 test("does not qualify a dust-driven FDV spike", () => {
@@ -164,8 +190,12 @@ test("does not qualify a dust-driven FDV spike", () => {
 test("uses rapid wallet growth when the Robinhood USD quote is temporarily unavailable", () => {
   let current = candidate();
   let result;
-  for (let index = 1; index <= 5; index++) {
-    result = recordCandidateTrade(current, buyTrade(index, { block: 100 + index, quoteUsd: null }));
+  for (let index = 1; index <= 8; index++) {
+    result = recordCandidateTrade(current, buyTrade(index, {
+      block: 100 + index,
+      timestampMs: 1_000_000 + index * 5_000,
+      quoteUsd: null,
+    }));
     current = result.candidate;
   }
   assert.equal(result.shouldNotify, true);
@@ -176,14 +206,14 @@ test("uses rapid wallet growth when the Robinhood USD quote is temporarily unava
 test("later FDV milestones update an already-qualified candidate", () => {
   let current = candidate({ sqrtPriceX96: q96 / 128n });
   let result;
-  for (let index = 1; index <= 3; index++) {
+  for (let index = 1; index <= 5; index++) {
     result = recordCandidateTrade(current, buyTrade(index, { block: 100 + index }));
     current = result.candidate;
   }
   assert.equal(result.shouldNotify, true);
   assert.deepEqual(result.newMilestones, []);
 
-  result = recordCandidateTrade(current, buyTrade(4, {
+  result = recordCandidateTrade(current, buyTrade(6, {
     block: 110,
     timestampMs: 1_070_000,
     sqrtPriceX96: q96 / 40n,

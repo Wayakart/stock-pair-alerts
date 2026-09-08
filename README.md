@@ -16,11 +16,11 @@ This is not a new-memecoin bot. The realtime listener watches onchain protocol e
 
 Robinhood launches are registered as candidates instead of alerting immediately. The listener subscribes to Uniswap v4 PoolManager swaps and alerts when a candidate reaches one of these default signals:
 
-- At least 3 unique buyers and $1,000 of buy volume in the first 60 seconds.
-- At least $5,000 of buy volume in the first 60 seconds.
-- At least 3 unique buyers in one block, shown as a coordination risk indicator.
-- At least 5 unique buyers in 60 seconds when Robinhood's USD quote endpoint is temporarily unavailable.
-- An estimated $20k, $50k, or $100k FDV, gated by at least 3 buyers or $1,000 of buy volume so dust swaps cannot trigger it alone.
+- At least 5 unique buyers and $1,500 of buy volume in the first 60 seconds, including 2 new wallets after the initial buy block and buys spanning at least 3 blocks.
+- At least $5,000 of buy volume from at least 2 buyers in the first 60 seconds, which remains the fast-track signal.
+- Same-block buyer concentration is shown as a coordination risk indicator but cannot qualify a token by itself.
+- At least 8 unique buyers with the same cross-block follow-through when Robinhood's USD quote endpoint is temporarily unavailable.
+- An estimated $20k, $50k, or $100k FDV, gated by the organic follow-through or fast-track volume rule so launch bundles and dust swaps cannot trigger it alone.
 
 The first qualified signal creates one Discord message and optionally triggers Rick once. Later FDV milestones edit that message in place. Each alert displays the project ticker and CA, paired stock, buyer count, buy volume, bundle indicators, estimated FDV when available, and signal transaction.
 
@@ -112,11 +112,13 @@ Environment variables:
 - `PONS_APPROVAL_ALERTS`: set to `1` to restore immediate Pons approval alerts. Defaults to `0`.
 - `MOMENTUM_WINDOW_MS`: early-signal window after launch. Defaults to `60000`.
 - `MOMENTUM_TRACKING_MS`: how long a pool remains active for milestone tracking. Defaults to `3600000`.
-- `MOMENTUM_MIN_UNIQUE_BUYERS`: buyers required alongside minimum USD volume. Defaults to `3`.
-- `MOMENTUM_MIN_BUY_VOLUME_USD`: early momentum and milestone volume gate. Defaults to `1000`.
+- `MOMENTUM_MIN_UNIQUE_BUYERS`: buyers required alongside minimum USD volume. Defaults to `5`.
+- `MOMENTUM_MIN_BUY_VOLUME_USD`: early momentum and milestone volume gate. Defaults to `1500`.
+- `MOMENTUM_MIN_BUY_BLOCKS`: distinct buy blocks required for organic follow-through. Defaults to `3`.
+- `MOMENTUM_MIN_FOLLOW_THROUGH_BUYERS`: new buyers after the initial buy block. Defaults to `2`.
 - `MOMENTUM_WHALE_BUY_VOLUME_USD`: standalone early buy-volume trigger. Defaults to `5000`.
-- `MOMENTUM_MIN_BUNDLE_BUYERS`: same-block unique-buyer trigger. Defaults to `3`.
-- `MOMENTUM_WALLET_FALLBACK_BUYERS`: wallet trigger used only when the USD price is unavailable. Defaults to `5`.
+- `MOMENTUM_MIN_BUNDLE_BUYERS`: same-block unique-buyer threshold displayed as a risk indicator. Defaults to `3`.
+- `MOMENTUM_WALLET_FALLBACK_BUYERS`: wallet trigger used only when the USD price is unavailable. Defaults to `8`.
 - `MOMENTUM_SUBSCRIPTION_REFRESH_MS`: candidate expiry and pool-subscription reconciliation interval. Defaults to `30000`.
 - `MOMENTUM_HISTORY_PATH`: optional override for the append-only NDJSON history path.
 - `SOLANA_RPC_HTTP_URL`: paid Solana HTTP RPC URL used for provider access and operational recovery. Pump create alerts decode directly from stream logs on the hot path.

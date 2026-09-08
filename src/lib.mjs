@@ -629,6 +629,19 @@ export function buildEmbed(alert) {
       inline: true,
     });
     fields.push({ name: "Age", value: Number(signal.ageSeconds || 0).toFixed(1) + "s", inline: true });
+    fields.push({
+      name: "Follow-through",
+      value: String(signal.followThroughBuyers ?? 0) + " new buyers / " + String(signal.buyBlockCount ?? 0) + " blocks",
+      inline: true,
+    });
+    if (Number.isFinite(signal.netBuyVolumeUsd)) {
+      fields.push({
+        name: "Net buy flow",
+        value: "$" + Math.round(signal.netBuyVolumeUsd).toLocaleString("en-US") +
+          " / " + Number(signal.sellToBuyPercent || 0).toFixed(0) + "% sold",
+        inline: true,
+      });
+    }
     if (Number.isFinite(signal.estimatedFdvUsd)) {
       fields.push({ name: "Estimated FDV", value: "$" + Math.round(signal.estimatedFdvUsd).toLocaleString("en-US"), inline: true });
     }

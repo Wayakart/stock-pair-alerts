@@ -18,11 +18,13 @@ export function buildV4SwapLogFilter(poolIds) {
 export const DEFAULT_MOMENTUM_THRESHOLDS = Object.freeze({
   earlyWindowMs: 60_000,
   trackingWindowMs: 3_600_000,
-  minUniqueBuyers: 3,
-  minBuyVolumeUsd: 1_000,
+  minUniqueBuyers: 5,
+  minBuyVolumeUsd: 1_500,
+  minBuyBlocks: 3,
+  minFollowThroughBuyers: 2,
   whaleBuyVolumeUsd: 5_000,
   minBundleBuyers: 3,
-  walletFallbackBuyers: 5,
+  walletFallbackBuyers: 8,
   fdvMilestonesUsd: [20_000, 50_000, 100_000],
 });
 
@@ -177,10 +179,17 @@ function computeMetrics(candidate, thresholds) {
   const trades = candidate.trades || [];
   const buys = trades.filter((trade) => trade.side === "buy");
   const earlyBuys = buys.filter((trade) => trade.timestampMs - candidate.launchedAtMs <= thresholds.earlyWindowMs);
+  const earlySells = trades.filter((trade) =>
+    trade.side === "sell" && trade.timestampMs - candidate.launchedAtMs <= thresholds.earlyWindowMs
+  );
   const uniqueBuyers = new Set(earlyBuys.map((trade) => trade.buyer).filter(Boolean)).size;
   const quoteBuyVolume = earlyBuys.reduce((sum, trade) => sum + trade.quoteAmount, 0);
+  const quoteSellVolume = earlySells.reduce((sum, trade) => sum + trade.quoteAmount, 0);
   const latestQuoteUsd = [...trades].reverse().find((trade) => trade.quoteUsd)?.quoteUsd || null;
   const buyVolumeUsd = latestQuoteUsd === null ? null : quoteBuyVolume * latestQuoteUsd;
+  const sellVolumeUsd = latestQuoteUsd === null ? null : quoteSellVolume * latestQuoteUsd;
+  const netBuyVolumeUsd = buyVolumeUsd === null ? null : buyVolumeUsd - sellVolumeUsd;
+  const sellToBuyPercent = quoteBuyVolume > 0 ? (quoteSellVolume / quoteBuyVolume) * 100 : null;
   const projectSupply = units(BigInt(candidate.project.totalSupply || 0), candidate.project.decimals);
   const buyersByBlock = new Map();
   const tokensByBlock = new Map();
@@ -191,6 +200,15 @@ function computeMetrics(candidate, thresholds) {
     tokensByBlock.set(trade.block, (tokensByBlock.get(trade.block) || 0) + trade.projectAmount);
     quoteByBuyer.set(trade.buyer, (quoteByBuyer.get(trade.buyer) || 0) + trade.quoteAmount);
   }
+  const buyBlocks = [...buyersByBlock.keys()].sort((a, b) => a - b);
+  const firstBuyBlock = buyBlocks[0];
+  const firstBlockBuyers = buyersByBlock.get(firstBuyBlock) || new Set();
+  const followThroughBuyers = new Set(
+    earlyBuys
+      .filter((trade) => trade.block !== firstBuyBlock && !firstBlockBuyers.has(trade.buyer))
+      .map((trade) => trade.buyer)
+      .filter(Boolean)
+  ).size;
   const maxSameBlockBuyers = Math.max(0, ...[...buyersByBlock.values()].map((buyers) => buyers.size));
   const maxBlockTokens = Math.max(0, ...tokensByBlock.values());
   const bundleSupplyPercent = projectSupply > 0 ? (maxBlockTokens / projectSupply) * 100 : null;
@@ -202,7 +220,13 @@ function computeMetrics(candidate, thresholds) {
   return {
     uniqueBuyers,
     buyVolumeUsd,
+    sellVolumeUsd,
+    netBuyVolumeUsd,
+    sellToBuyPercent,
     quoteBuyVolume,
+    quoteSellVolume,
+    buyBlockCount: buyBlocks.length,
+    followThroughBuyers,
     maxSameBlockBuyers,
     bundleSupplyPercent,
     topBuyerSharePercent,
@@ -228,26 +252,31 @@ export function recordCandidateTrade(candidate, trade, options = {}) {
   };
   const metrics = computeMetrics(next, thresholds);
   const withinEarlyWindow = trade.timestampMs - next.launchedAtMs <= thresholds.earlyWindowMs;
+  const hasOrganicFollowThrough = metrics.buyBlockCount >= thresholds.minBuyBlocks &&
+    metrics.followThroughBuyers >= thresholds.minFollowThroughBuyers;
+  const hasBuyerMomentum = metrics.uniqueBuyers >= thresholds.minUniqueBuyers && hasOrganicFollowThrough;
+  const hasUsdMomentum = metrics.buyVolumeUsd !== null && metrics.buyVolumeUsd >= thresholds.minBuyVolumeUsd;
   const reasons = [];
-  if (withinEarlyWindow && metrics.buyVolumeUsd !== null && metrics.buyVolumeUsd >= thresholds.whaleBuyVolumeUsd) {
+  if (withinEarlyWindow && metrics.uniqueBuyers >= 2 &&
+      metrics.buyVolumeUsd !== null && metrics.buyVolumeUsd >= thresholds.whaleBuyVolumeUsd) {
     reasons.push("whale buy volume");
   }
-  if (withinEarlyWindow && metrics.uniqueBuyers >= thresholds.minUniqueBuyers &&
-      metrics.buyVolumeUsd !== null && metrics.buyVolumeUsd >= thresholds.minBuyVolumeUsd) {
+  if (withinEarlyWindow && hasBuyerMomentum && hasUsdMomentum) {
     reasons.push("early buyer momentum");
   }
-  if (withinEarlyWindow && metrics.maxSameBlockBuyers >= thresholds.minBundleBuyers) {
-    reasons.push("coordinated same-block buys");
-  }
-  if (withinEarlyWindow && metrics.buyVolumeUsd === null && metrics.uniqueBuyers >= thresholds.walletFallbackBuyers) {
+  if (withinEarlyWindow && metrics.buyVolumeUsd === null &&
+      metrics.uniqueBuyers >= thresholds.walletFallbackBuyers && hasOrganicFollowThrough) {
     reasons.push("rapid wallet growth; USD quote unavailable");
   }
-  const milestoneGate = metrics.uniqueBuyers >= thresholds.minUniqueBuyers ||
-    (metrics.buyVolumeUsd !== null && metrics.buyVolumeUsd >= thresholds.minBuyVolumeUsd);
+  const milestoneGate = (hasBuyerMomentum && hasUsdMomentum) ||
+    (metrics.uniqueBuyers >= 2 && metrics.buyVolumeUsd !== null && metrics.buyVolumeUsd >= thresholds.whaleBuyVolumeUsd);
   const newMilestones = milestoneGate && metrics.estimatedFdvUsd !== null
     ? thresholds.fdvMilestonesUsd.filter((level) => metrics.estimatedFdvUsd >= level && !(next.milestones || []).includes(level))
     : [];
   if (newMilestones.length) reasons.push("estimated FDV milestone");
+  if (reasons.length && metrics.maxSameBlockBuyers >= thresholds.minBundleBuyers) {
+    reasons.push("same-block concentration risk");
+  }
   const wasQualified = Boolean(next.qualifiedAt);
   if (!wasQualified && reasons.length) next.qualifiedAt = trade.timestampMs;
   next.milestones = [...(next.milestones || []), ...newMilestones].sort((a, b) => a - b);

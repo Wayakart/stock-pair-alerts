@@ -144,6 +144,8 @@ function momentumThresholdsFromEnv() {
     trackingWindowMs: numberEnv("MOMENTUM_TRACKING_MS", DEFAULT_MOMENTUM_THRESHOLDS.trackingWindowMs),
     minUniqueBuyers: numberEnv("MOMENTUM_MIN_UNIQUE_BUYERS", DEFAULT_MOMENTUM_THRESHOLDS.minUniqueBuyers),
     minBuyVolumeUsd: numberEnv("MOMENTUM_MIN_BUY_VOLUME_USD", DEFAULT_MOMENTUM_THRESHOLDS.minBuyVolumeUsd),
+    minBuyBlocks: numberEnv("MOMENTUM_MIN_BUY_BLOCKS", DEFAULT_MOMENTUM_THRESHOLDS.minBuyBlocks),
+    minFollowThroughBuyers: numberEnv("MOMENTUM_MIN_FOLLOW_THROUGH_BUYERS", DEFAULT_MOMENTUM_THRESHOLDS.minFollowThroughBuyers),
     whaleBuyVolumeUsd: numberEnv("MOMENTUM_WHALE_BUY_VOLUME_USD", DEFAULT_MOMENTUM_THRESHOLDS.whaleBuyVolumeUsd),
     minBundleBuyers: numberEnv("MOMENTUM_MIN_BUNDLE_BUYERS", DEFAULT_MOMENTUM_THRESHOLDS.minBundleBuyers),
     walletFallbackBuyers: numberEnv("MOMENTUM_WALLET_FALLBACK_BUYERS", DEFAULT_MOMENTUM_THRESHOLDS.walletFallbackBuyers),
