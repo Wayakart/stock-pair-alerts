@@ -16,7 +16,8 @@ import {
   extractRhAssets,
   applyPonsLogs,
   applyLongLogs,
-  buildEmbed,
+  buildDiscordAlertPayload,
+  decodeAbiString,
   emptyState,
   logsRpcUrl,
   parseMaxBlockRange,
@@ -25,6 +26,7 @@ import {
   O1_CATALOG_URL,
   extractO1Quotes,
   applyO1Quotes,
+  discordWebhookUrls,
 } from "./lib.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -175,39 +177,46 @@ async function getLogsBudgeted(rpcUrl, fromBlock, toBlock, address, topic0, { ch
   return { logs, scannedTo: toBlock, done: true, url };
 }
 
-async function notify(webhooks, embed) {
-  const payload = JSON.stringify({ username: "stock pair alerts", embeds: [embed] });
+async function notify(webhooks, payload) {
+  const payloadBody = JSON.stringify(payload);
   for (const url of webhooks) {
     for (let attempt = 1; attempt <= 5; attempt++) {
       const res = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", "user-agent": UA },
-        body: payload,
+        body: payloadBody,
       });
       if ([200, 204].includes(res.status)) break;
-      const body = await res.text();
+      const responseBody = await res.text();
       if (res.status === 429 && attempt < 5) {
         let wait = 1;
-        try { wait = Number(JSON.parse(body).retry_after) || 1; } catch {}
+        try { wait = Number(JSON.parse(responseBody).retry_after) || 1; } catch {}
         wait = Math.min(Math.max(wait, 0.3), 8);
         console.warn("Discord 429, retry in", wait, "s");
         await sleep(wait * 1000 + 150);
         continue;
       }
-      throw new Error("Discord " + res.status + " " + body.slice(0, 120));
+      throw new Error("Discord " + res.status + " " + responseBody.slice(0, 120));
     }
   }
 }
 
+async function tokenMetadata(rpcUrl, address) {
+  const [nameResult, symbolResult] = await Promise.all([
+    rpc(rpcUrl, "eth_call", [{ to: address, data: "0x06fdde03" }, "latest"]),
+    rpc(rpcUrl, "eth_call", [{ to: address, data: "0x95d89b41" }, "latest"]),
+  ]);
+  return { name: decodeAbiString(nameResult), symbol: decodeAbiString(symbolResult) };
+}
+
 function webhooksFromEnv() {
-  return [process.env.DISCORD_WEBHOOK_URL, process.env.DISCORD_WEBHOOK_URL_2].filter(
-    (u) => u && u.startsWith("https://")
-  );
+  return discordWebhookUrls(process.env);
 }
 
 async function main() {
   const dryRun = truthy(process.env.DRY_RUN);
   const testPing = truthy(process.env.TEST_PING);
+  const rickAutoScan = truthy(process.env.RICK_AUTOSCAN);
   const rpcUrl = resolveRpcUrl(process.env.RPC_URL);
   const hooks = webhooksFromEnv();
   console.log(JSON.stringify({
@@ -222,10 +231,13 @@ async function main() {
     if (!hooks.length) throw new Error("test_ping requested but DISCORD_WEBHOOK_URL secret is missing");
     if (!dryRun) {
       await notify(hooks, {
-        title: "Watcher alive",
-        description: "stock-pair-alerts poller is running.",
-        color: 0x0984e3,
-        timestamp: new Date().toISOString(),
+        username: "stock pair alerts",
+        embeds: [{
+          title: "Watcher alive",
+          description: "stock-pair-alerts poller is running.",
+          color: 0x0984e3,
+          timestamp: new Date().toISOString(),
+        }],
       });
       console.log("Posted watcher-alive ping.");
     }
@@ -299,35 +311,51 @@ async function main() {
   if (state.initialized) {
     for (const e of pons.alerts) {
       const meta = nextRh[e.pairToken] || {};
-      alerts.push({ platform: "Pons", symbol: meta.symbol, name: meta.name, address: e.pairToken, tx: e.tx });
+      alerts.push({
+        chain: "robinhood",
+        platform: "Pons",
+        verb: "approved",
+        projectSymbol: meta.symbol,
+        projectName: meta.name,
+        projectAddress: e.pairToken,
+        quotes: [],
+        tx: e.tx,
+      });
     }
   }
   if (longReady && state.longReady) {
     for (const e of long.alerts) {
       const meta = nextRh[e.numeraire] || {};
+      let project = {};
+      try { project = await tokenMetadata(usedRpc, e.asset); }
+      catch (err) { console.warn("Long token metadata failed:", err.message); }
       alerts.push({
+        chain: "robinhood",
         platform: "Long",
-        symbol: meta.symbol,
-        name: meta.name,
-        address: e.numeraire,
+        projectSymbol: project.symbol,
+        projectName: project.name,
+        projectAddress: e.asset,
+        quotes: [{ ...meta, address: e.numeraire }],
         tx: e.tx,
-        extra: "First Long pair against this stock.",
       });
     }
   }
   for (const e of o1.alerts) {
     alerts.push({
+      chain: "robinhood",
       platform: "01",
-      symbol: e.symbol,
-      name: e.name,
-      address: e.address,
+      verb: "added",
+      projectSymbol: e.symbol,
+      projectName: e.name,
+      projectAddress: e.address,
+      quotes: [],
       extra: "New official 01 quote stock.",
     });
   }
 
   if (!dryRun && hooks.length) {
     for (const a of alerts) {
-      try { await notify(hooks, buildEmbed(a)); }
+      try { await notify(hooks, buildDiscordAlertPayload(a, { rickAutoScan })); }
       catch (err) { console.warn("notify failed, continuing so state still saves:", err.message); }
     }
   } else if (alerts.length && !hooks.length) {
@@ -340,6 +368,7 @@ async function main() {
     ponsLastBlock: pons.ponsLastBlock,
     ponsApproved: pons.ponsApproved,
     longLastBlock: long.longLastBlock,
+    longLaunches: long.longLaunches,
     longNumeraires: long.longNumeraires,
     longReady,
     o1Quotes: o1.o1Quotes,

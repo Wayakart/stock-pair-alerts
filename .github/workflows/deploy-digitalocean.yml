@@ -6,7 +6,7 @@ on:
       restart_services:
         description: Restart realtime services after deploy
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: read
@@ -33,6 +33,7 @@ jobs:
             --exclude '.git' \
             --exclude 'node_modules' \
             --exclude 'state/*.json' \
+            --exclude 'state/*.ndjson' \
             --exclude 'state/KILL_SWITCH' \
             -e "ssh -i ~/.ssh/stock_pair_do -o IdentitiesOnly=yes" \
             ./ "root@${{ secrets.DO_HOST }}:/opt/stock-pair-alerts/"
@@ -43,22 +44,41 @@ jobs:
           cat > /tmp/stock-pair-alerts.env <<ENV
           DISCORD_WEBHOOK_URL=${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_WEBHOOK_URL_2=${{ secrets.DISCORD_WEBHOOK_URL_2 }}
+          DISCORD_ALERTS_ENABLED=${{ vars.DISCORD_ALERTS_ENABLED || '0' }}
           REALTIME_RPC_WS_URL=${{ secrets.QUICKNODE_ROBINHOOD_WS_URL }}
           REQUIRE_QUICKNODE_ROBINHOOD=1
           ALLOW_PUBLIC_ROBINHOOD_RPC=0
           WATCH_PROTOCOLS=pons,long,flap,pair
-          QUICKNODE_MONTHLY_PLAN_USD=249
+          PONS_APPROVAL_ALERTS=${{ vars.PONS_APPROVAL_ALERTS || '0' }}
+          MOMENTUM_WINDOW_MS=${{ vars.MOMENTUM_WINDOW_MS || '60000' }}
+          MOMENTUM_TRACKING_MS=${{ vars.MOMENTUM_TRACKING_MS || '3600000' }}
+          MOMENTUM_MIN_UNIQUE_BUYERS=${{ vars.MOMENTUM_MIN_UNIQUE_BUYERS || '5' }}
+          MOMENTUM_MIN_BUY_VOLUME_USD=${{ vars.MOMENTUM_MIN_BUY_VOLUME_USD || '1500' }}
+          MOMENTUM_MIN_BUY_BLOCKS=${{ vars.MOMENTUM_MIN_BUY_BLOCKS || '3' }}
+          MOMENTUM_MIN_FOLLOW_THROUGH_BUYERS=${{ vars.MOMENTUM_MIN_FOLLOW_THROUGH_BUYERS || '2' }}
+          MOMENTUM_WHALE_BUY_VOLUME_USD=${{ vars.MOMENTUM_WHALE_BUY_VOLUME_USD || '5000' }}
+          MOMENTUM_MIN_BUNDLE_BUYERS=${{ vars.MOMENTUM_MIN_BUNDLE_BUYERS || '3' }}
+          MOMENTUM_WALLET_FALLBACK_BUYERS=${{ vars.MOMENTUM_WALLET_FALLBACK_BUYERS || '8' }}
+          ALERT_CAP_MAX=${{ vars.ALERT_CAP_MAX || '10' }}
+          ALERT_CAP_WINDOW_MS=${{ vars.ALERT_CAP_WINDOW_MS || '28800000' }}
+          QUICKNODE_MONTHLY_PLAN_USD=${{ vars.QUICKNODE_MONTHLY_PLAN_USD || '249' }}
+          QUICKNODE_INCLUDED_CREDITS=${{ vars.QUICKNODE_INCLUDED_CREDITS || '450000000' }}
+          QUICKNODE_EXTRA_CREDIT_USD_PER_MILLION=${{ vars.QUICKNODE_EXTRA_CREDIT_USD_PER_MILLION || '0.56' }}
+          QUICKNODE_ADMIN_API_KEY=${{ secrets.QUICKNODE_ADMIN_API_KEY }}
+          REQUIRE_QUICKNODE_BUDGET_API=1
           SOLANA_RPC_HTTP_URL=${{ secrets.HELIUS_RPC_HTTP_URL }}
           SOLANA_RPC_WS_URL=${{ secrets.HELIUS_RPC_WS_URL }}
           SOLANA_WATCH_PROTOCOLS=pump
-          SOLANA_STREAM_MODE=laserstream-wss
+          SOLANA_STREAM_MODE=${{ vars.SOLANA_STREAM_MODE || 'standard-wss' }}
+          SOLANA_LASERSTREAM_ENDPOINT=${{ vars.SOLANA_LASERSTREAM_ENDPOINT || 'https://laserstream-mainnet-ewr.helius-rpc.com' }}
+          SOLANA_REPLAY_OVERLAP_SLOTS=128
           SOLANA_STOCK_REFRESH_MS=300000
           HELIUS_API_KEY=${{ secrets.HELIUS_API_KEY }}
           HELIUS_PROJECT_ID=${{ secrets.HELIUS_PROJECT_ID }}
           REQUIRE_HELIUS_BUDGET_API=1
-          HELIUS_MONTHLY_PLAN_USD=499
-          HELIUS_INCLUDED_CREDITS=100000000
-          HELIUS_EXTRA_CREDIT_USD_PER_MILLION=5
+          HELIUS_MONTHLY_PLAN_USD=${{ vars.HELIUS_MONTHLY_PLAN_USD || '499' }}
+          HELIUS_INCLUDED_CREDITS=${{ vars.HELIUS_INCLUDED_CREDITS || '100000000' }}
+          HELIUS_EXTRA_CREDIT_USD_PER_MILLION=${{ vars.HELIUS_EXTRA_CREDIT_USD_PER_MILLION || '5' }}
           WEEKLY_BUDGET_USD=1000
           BUDGET_CHECK_MS=60000
           HEARTBEAT_MS=60000
@@ -66,11 +86,17 @@ jobs:
           DRY_RUN_DECISIONS=1
           DRY_RUN_MAX_USD=100
           DRY_RUN_MAX_SLIPPAGE_BPS=500
-          DIGITALOCEAN_MONTHLY_USD=6
+          DIGITALOCEAN_MONTHLY_USD=${{ vars.DIGITALOCEAN_MONTHLY_USD || '6' }}
+          DIGITALOCEAN_MONTHLY_HARD_CAP_USD=${{ vars.DIGITALOCEAN_MONTHLY_HARD_CAP_USD || '6' }}
+          DIGITALOCEAN_BILLING_TOKEN=${{ secrets.DIGITALOCEAN_BILLING_TOKEN }}
+          REQUIRE_DIGITALOCEAN_BUDGET_API=1
           INTERESTING_SYMBOLS=${{ secrets.INTERESTING_SYMBOLS }}
           IGNORE_SYMBOLS=${{ secrets.IGNORE_SYMBOLS }}
           INTERESTING_ADDRESSES=${{ secrets.INTERESTING_ADDRESSES }}
           IGNORE_ADDRESSES=${{ secrets.IGNORE_ADDRESSES }}
+          EVM_BOOTSTRAP_LOOKBACK_BLOCKS=100000
+          EVM_BACKFILL_OVERLAP_BLOCKS=32
+          RICK_AUTOSCAN=${{ vars.RICK_AUTOSCAN || '0' }}
           ENV
           sed -i 's/^          //' /tmp/stock-pair-alerts.env
           scp -i ~/.ssh/stock_pair_do -o IdentitiesOnly=yes /tmp/stock-pair-alerts.env "root@${{ secrets.DO_HOST }}:/tmp/stock-pair-alerts.env"
@@ -101,6 +127,7 @@ jobs:
           ExecStart=/usr/bin/npm run realtime
           Restart=always
           RestartSec=2
+          RestartPreventExitStatus=2
           StateDirectory=stock-pair-alerts
           LogsDirectory=stock-pair-alerts
           NoNewPrivileges=true

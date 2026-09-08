@@ -6,6 +6,7 @@
     "watch": "node src/watch.mjs",
     "realtime": "node src/realtime.mjs",
     "solana-realtime": "node src/solana-realtime.mjs",
+    "replay:robinhood": "node src/replay-robinhood.mjs",
     "benchmark": "node src/benchmark-providers.mjs",
     "status": "node src/status.mjs",
     "test": "node --test"
@@ -14,6 +15,8 @@
     "node": ">=20"
   },
   "dependencies": {
+    "bs58": "^6.0.0",
+    "helius-laserstream": "^0.8.5",
     "ws": "^8.18.3"
   }
 }

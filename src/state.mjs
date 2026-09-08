@@ -15,3 +15,8 @@ export async function writeJsonFile(file, value) {
   await fs.writeFile(tmp, JSON.stringify(value, null, 2) + "\n");
   await fs.rename(tmp, file);
 }
+
+export async function appendJsonLine(file, value) {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.appendFile(file, JSON.stringify(value) + "\n");
+}

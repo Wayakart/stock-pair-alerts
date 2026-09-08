@@ -1,21 +1,23 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import bs58 from "bs58";
+import { CommitmentLevel, subscribe } from "helius-laserstream";
 import WebSocket from "ws";
-import {
-  createBudgetGuard,
-  isBudgetStopError,
-} from "./budget.mjs";
+import { createAlertCap } from "./alert-cap.mjs";
+import { createBudgetGuard, isBudgetStopError } from "./budget.mjs";
 import { createDryRunDecisionEngine } from "./decision.mjs";
 import {
   PUMP_PROGRAM,
   STONKFUN_PAIRS_URL,
-  buildSolanaEmbed,
+  applyPumpStockLaunches,
+  buildDiscordAlertPayload,
   buildStatusEmbed,
   csvSet,
+  discordWebhookUrls,
+  decodePumpCreateEvent,
   emptyState,
   extractStonkfunStockPairs,
-  findPumpStockLaunch,
-  applyPumpStockLaunches,
+  isPumpCreateLog,
   isInterestingSolanaAsset,
   redactUrl,
 } from "./lib.mjs";
@@ -25,25 +27,45 @@ import { readJsonFile, writeJsonFile } from "./state.mjs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const legacyStatePath = path.join(root, "state", "seen.json");
 const statePath = path.join(root, "state", "solana.json");
-const budgetStatePath = path.join(root, "state", "budget.json");
-const killSwitchPath = path.join(root, "state", "KILL_SWITCH");
-const UA = "stock-pair-alerts/1.5";
+const budgetStatePath = path.resolve(process.env.BUDGET_STATE_PATH || path.join(root, "state", "budget.json"));
+const killSwitchPath = path.resolve(process.env.KILL_SWITCH_PATH || path.join(root, "state", "KILL_SWITCH"));
+const alertCapStatePath = path.resolve(process.env.ALERT_CAP_STATE_PATH || path.join(root, "state", "alert-cap.json"));
+const alertCapHistoryPath = path.resolve(process.env.ALERT_CAP_HISTORY_PATH || path.join(root, "state", "alert-events.ndjson"));
+const UA = "stock-pair-alerts/1.6";
 const DEFAULT_SOLANA_RPC_HTTP = "https://api.mainnet-beta.solana.com";
 const DEFAULT_SOLANA_RPC_WS = "wss://api.mainnet-beta.solana.com";
+const DEFAULT_LASERSTREAM_ENDPOINT = "https://laserstream-mainnet-ewr.helius-rpc.com";
+const WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112";
+const NATIVE_SOL_MINT = "11111111111111111111111111111111";
+const NATIVE_QUOTE_MINTS = new Set([NATIVE_SOL_MINT, WRAPPED_SOL_MINT]);
 const STOCK_REFRESH_MS = Number(process.env.SOLANA_STOCK_REFRESH_MS || 300_000);
 const BUDGET_CHECK_MS = Number(process.env.BUDGET_CHECK_MS || 60_000);
 const HEARTBEAT_MS = Number(process.env.HEARTBEAT_MS || 60_000);
 const STALE_CONNECTION_MS = Number(process.env.STALE_CONNECTION_MS || 180_000);
-const SOLANA_STREAM_MODE = process.env.SOLANA_STREAM_MODE || "laserstream-wss";
+const STATE_FLUSH_MS = Number(process.env.SOLANA_STATE_FLUSH_MS || 1_000);
+const REPLAY_OVERLAP_SLOTS = Number(process.env.SOLANA_REPLAY_OVERLAP_SLOTS || 128);
+const ALERT_CAP_MAX = Number(process.env.ALERT_CAP_MAX || 10);
+const ALERT_CAP_WINDOW_MS = Number(process.env.ALERT_CAP_WINDOW_MS || 8 * 60 * 60 * 1_000);
+const SOLANA_STREAM_MODE = process.env.SOLANA_STREAM_MODE || "standard-wss";
 
 const enabledProtocols = csvSet(process.env.SOLANA_WATCH_PROTOCOLS || "pump");
-const includeSymbols = csvSet(process.env.INTERESTING_SYMBOLS, { normalize: (v) => v.toUpperCase() });
-const excludeSymbols = csvSet(process.env.IGNORE_SYMBOLS, { normalize: (v) => v.toUpperCase() });
-const includeAddresses = csvSet(process.env.INTERESTING_ADDRESSES, { normalize: (v) => v });
-const excludeAddresses = csvSet(process.env.IGNORE_ADDRESSES, { normalize: (v) => v });
+const includeSymbols = csvSet(process.env.INTERESTING_SYMBOLS, { normalize: (value) => value.toUpperCase() });
+const excludeSymbols = csvSet(process.env.IGNORE_SYMBOLS, { normalize: (value) => value.toUpperCase() });
+const includeAddresses = csvSet(process.env.INTERESTING_ADDRESSES, { normalize: (value) => value });
+const excludeAddresses = csvSet(process.env.IGNORE_ADDRESSES, { normalize: (value) => value });
 const interestingOptions = { includeSymbols, excludeSymbols, includeAddresses, excludeAddresses };
+const alertCap = createAlertCap({
+  statePath: alertCapStatePath,
+  historyPath: alertCapHistoryPath,
+  maxAlerts: ALERT_CAP_MAX,
+  windowMs: ALERT_CAP_WINDOW_MS,
+});
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function boolEnv(name) {
+  return ["1", "true", "yes"].includes(String(process.env[name] || "").toLowerCase());
+}
 
 function solanaHttpUrlFromEnv() {
   const raw = String(process.env.SOLANA_RPC_HTTP_URL || "").trim();
@@ -52,20 +74,49 @@ function solanaHttpUrlFromEnv() {
   throw new Error("SOLANA_RPC_HTTP_URL is required for the Solana realtime listener. Set ALLOW_PUBLIC_SOLANA_RPC=1 only for local smoke tests.");
 }
 
-function solanaWsUrlFromEnv() {
+function solanaWsUrlFromEnv(httpUrl) {
   const raw = String(process.env.SOLANA_RPC_WS_URL || "").trim();
   if (raw) return raw;
-  const http = solanaHttpUrlFromEnv();
-  if (/^https:\/\//i.test(http)) return http.replace(/^https:\/\//i, "wss://");
-  if (/^http:\/\//i.test(http)) return http.replace(/^http:\/\//i, "ws://");
+  if (/^https:\/\//i.test(httpUrl)) return httpUrl.replace(/^https:\/\//i, "wss://");
+  if (/^http:\/\//i.test(httpUrl)) return httpUrl.replace(/^http:\/\//i, "ws://");
   if (process.env.ALLOW_PUBLIC_SOLANA_RPC === "1") return DEFAULT_SOLANA_RPC_WS;
   throw new Error("SOLANA_RPC_WS_URL is required for the Solana realtime listener.");
 }
 
+function laserstreamConfigFromEnv() {
+  const apiKey = String(process.env.HELIUS_API_KEY || "").trim();
+  if (!apiKey) throw new Error("HELIUS_API_KEY is required for SOLANA_STREAM_MODE=laserstream-grpc");
+  return {
+    apiKey,
+    endpoint: String(process.env.SOLANA_LASERSTREAM_ENDPOINT || DEFAULT_LASERSTREAM_ENDPOINT).trim(),
+    replay: true,
+    maxReconnectAttempts: Number(process.env.LASERSTREAM_MAX_RECONNECT_ATTEMPTS || 50),
+  };
+}
+
 function webhooksFromEnv() {
-  return [process.env.DISCORD_WEBHOOK_URL, process.env.DISCORD_WEBHOOK_URL_2].filter(
-    (u) => u && u.startsWith("https://")
-  );
+  return discordWebhookUrls(process.env);
+}
+
+async function reserveTokenAlert(alert) {
+  const result = await alertCap.reserve({
+    chain: alert.chain,
+    platform: alert.platform,
+    projectAddress: alert.projectAddress,
+    projectSymbol: alert.projectSymbol,
+    tx: alert.tx,
+  });
+  logJson(result.allowed ? "alert_cap_reserved" : "alert_cap_suppressed", {
+    chain: alert.chain,
+    platform: alert.platform,
+    projectAddress: alert.projectAddress,
+    projectSymbol: alert.projectSymbol,
+    used: result.used,
+    remaining: result.remaining,
+    maxAlerts: result.maxAlerts,
+    windowMs: result.windowMs,
+  });
+  return result;
 }
 
 async function readState() {
@@ -88,34 +139,30 @@ async function httpJson(url, opts = {}) {
   try {
     body = text ? JSON.parse(text) : null;
   } catch {
-    throw new Error((opts.method || "GET") + " " + url + " -> " + res.status + " non-json: " + text.slice(0, 120));
+    throw new Error((opts.method || "GET") + " " + redactUrl(url) + " -> " + res.status + " non-json");
   }
-  if (!res.ok) {
-    throw new Error((opts.method || "GET") + " " + url + " -> " + res.status + " " + text.slice(0, 180));
-  }
+  if (!res.ok) throw new Error((opts.method || "GET") + " " + redactUrl(url) + " -> " + res.status);
   return body;
 }
 
-async function notify(webhooks, embed) {
-  const payload = JSON.stringify({ username: "stock pair alerts", embeds: [embed] });
+async function notify(webhooks, payload) {
+  const body = JSON.stringify(payload);
   for (const url of webhooks) {
     for (let attempt = 1; attempt <= 5; attempt++) {
       const res = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", "user-agent": UA },
-        body: payload,
+        body,
       });
       if ([200, 204].includes(res.status)) break;
-      const body = await res.text();
+      const responseBody = await res.text();
       if (res.status === 429 && attempt < 5) {
         let wait = 1;
-        try { wait = Number(JSON.parse(body).retry_after) || 1; } catch {}
-        wait = Math.min(Math.max(wait, 0.3), 8);
-        console.warn("Discord 429, retry in", wait, "s");
-        await sleep(wait * 1000 + 150);
+        try { wait = Number(JSON.parse(responseBody).retry_after) || 1; } catch {}
+        await sleep(Math.min(Math.max(wait, 0.3), 8) * 1000 + 150);
         continue;
       }
-      throw new Error("Discord " + res.status + " " + body.slice(0, 120));
+      throw new Error("Discord " + res.status + " " + responseBody.slice(0, 120));
     }
   }
 }
@@ -129,45 +176,35 @@ function makeStockCache() {
       if (force || stale || !Object.keys(value).length) {
         value = extractStonkfunStockPairs(await httpJson(STONKFUN_PAIRS_URL));
         refreshedAt = Date.now();
-        console.log(JSON.stringify({
-          solanaStockCount: Object.keys(value).length,
+        logJson("solana_stock_catalog", {
+          count: Object.keys(value).length,
           refreshedAt: new Date(refreshedAt).toISOString(),
-        }));
+        });
       }
       return value;
     },
   };
 }
 
-async function solanaRpc(httpUrl, method, params) {
-  const body = await httpJson(httpUrl, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-  });
-  if (body.error) throw new Error(method + " " + JSON.stringify(body.error));
-  return body.result;
+function makeBudgetChecker(budgetGuard) {
+  let lastChecked = 0;
+  return async ({ force = false } = {}) => {
+    const now = Date.now();
+    if (!force && now - lastChecked < BUDGET_CHECK_MS) return null;
+    const result = await budgetGuard.check({ force });
+    lastChecked = now;
+    return result;
+  };
 }
 
-async function postOrLogAlert(hooks, alert) {
-  console.log(JSON.stringify({ alert }));
-  if (!hooks.length) {
-    console.warn("alert ready but DISCORD_WEBHOOK_URL is not set");
-    return false;
-  }
-  try {
-    await notify(hooks, buildSolanaEmbed(alert));
-    return true;
-  } catch (err) {
-    console.warn("notify failed:", err.message);
-    return false;
-  }
+function alertAllowed(meta, address) {
+  return isInterestingSolanaAsset({ address, symbol: meta.symbol }, interestingOptions);
 }
 
 async function postStatusAlert(hooks, status) {
   if (!hooks.length) return false;
   try {
-    await notify(hooks, buildStatusEmbed(status));
+    await notify(hooks, { username: "stock pair alerts", embeds: [buildStatusEmbed(status)] });
     return true;
   } catch (err) {
     console.warn("status notify failed:", err.message);
@@ -175,107 +212,127 @@ async function postStatusAlert(hooks, status) {
   }
 }
 
-function alertAllowed(meta, address) {
-  return isInterestingSolanaAsset({ address, symbol: meta.symbol }, interestingOptions);
+async function checkBudgetAndWarn(checkBudget, hooks) {
+  const budget = await checkBudget();
+  if (!budget?.crossedThreshold) return budget;
+  warnJson("budget_threshold_crossed", {
+    threshold: budget.crossedThreshold,
+    estimatedUsd: budget.estimatedUsd,
+  });
+  await postStatusAlert(hooks, {
+    title: "Infrastructure budget threshold crossed",
+    level: "warn",
+    service: "solana",
+    message: "Configured provider spend crossed " + Math.round(budget.crossedThreshold * 100) + "% of the weekly cap.",
+    fields: [
+      { name: "Estimated spend", value: "$" + Number(budget.estimatedUsd || 0).toFixed(2), inline: true },
+      { name: "Budget", value: "$" + Number(budget.weeklyBudgetUsd || 0).toFixed(2), inline: true },
+    ],
+  });
+  return budget;
 }
 
-function isPumpCreateLog(logs) {
-  return (logs || []).some((line) => /Instruction:\s*Create\b/i.test(line));
-}
-
-async function handlePumpSignature({ state, signature, slot, httpUrl, stockCache, hooks, decisionEngine, heartbeat, trace }) {
-  if (!signature || (state.pumpStockLaunches || []).includes(signature)) return state;
-  const tx = await solanaRpc(httpUrl, "getTransaction", [
-    signature,
-    { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 },
-  ]);
-  trace.mark("transaction_fetched");
-  if (!tx) return state;
-  tx.slot = tx.slot || slot;
+async function handlePumpCreate(context) {
+  const { event, signature, slot, stockCache, hooks, decisionEngine, heartbeat, trace, rickAutoScan } = context;
+  if (!event?.mint || !event?.quoteMint || !signature) return context.state;
+  if ((context.state.pumpStockLaunches || []).includes(signature)) return context.state;
 
   let stockMap = await stockCache.get();
-  let event = findPumpStockLaunch(tx, stockMap);
-  if (!event) {
+  let quote = stockMap[event.quoteMint];
+  if (!quote && !NATIVE_QUOTE_MINTS.has(event.quoteMint)) {
     stockMap = await stockCache.get({ force: true });
-    event = findPumpStockLaunch(tx, stockMap);
+    quote = stockMap[event.quoteMint];
   }
-  if (!event) return state;
+  if (!quote) return context.state;
 
-  const pump = applyPumpStockLaunches(state, [event], { stockMap, allowAlerts: true });
-  const next = { ...state, initialized: true, pumpStockLaunches: pump.pumpStockLaunches };
-  if (!pump.alerts.length) return next;
-
-  const meta = stockMap[event.quoteMint] || {};
-  if (!alertAllowed(meta, event.quoteMint)) return next;
+  const launch = { ...event, signature, slot };
+  const applied = applyPumpStockLaunches(context.state, [launch], { stockMap, allowAlerts: true });
+  const next = {
+    ...context.state,
+    initialized: true,
+    pumpStockLaunches: applied.pumpStockLaunches,
+    pumpLastSlot: Math.max(Number(context.state.pumpLastSlot || 0), Number(slot || 0)),
+    pumpLastSignature: signature,
+  };
+  if (!applied.alerts.length || !alertAllowed(quote, event.quoteMint)) return next;
 
   const alert = {
+    chain: "solana",
     platform: "Pump.fun",
-    symbol: meta.symbol,
-    name: meta.name,
-    address: event.quoteMint,
-    tx: event.signature,
-    extra: "Pump create transaction referenced a Solana stock quote mint.",
+    projectAddress: event.mint,
+    projectSymbol: event.symbol,
+    projectName: event.name,
+    quotes: [{ ...quote, address: event.quoteMint }],
+    tx: signature,
+    extra: "Pump CreateEvent used a tracked Solana stock mint as its quote asset.",
   };
+  console.log(JSON.stringify({ alert }));
+  if (!hooks.length) {
+    await decisionEngine.evaluate(alert, { receivedToDecisionMs: trace.elapsedMs() });
+    console.warn("alert ready but DISCORD_WEBHOOK_URL is not set");
+    return next;
+  }
+  const reservation = await reserveTokenAlert(alert);
+  if (!reservation.allowed) {
+    trace.mark("alert_suppressed");
+    return next;
+  }
   await decisionEngine.evaluate(alert, { receivedToDecisionMs: trace.elapsedMs() });
-  if (await postOrLogAlert(hooks, alert)) heartbeat.alert();
-  trace.mark("alert_sent");
+  try {
+    await notify(hooks, buildDiscordAlertPayload(alert, { rickAutoScan }));
+    heartbeat.alert();
+    trace.mark("alert_sent");
+  } catch (err) {
+    console.warn("notify failed:", err.message);
+  }
   return next;
 }
 
-function makeBudgetChecker(budgetGuard) {
-  let lastChecked = 0;
-  return async ({ force = false } = {}) => {
-    const now = Date.now();
-    if (!force && now - lastChecked < BUDGET_CHECK_MS) return;
-    await budgetGuard.check({ force });
-    lastChecked = now;
-  };
-}
-
-async function runConnection({ wsUrl, httpUrl, stockCache, hooks, budgetGuard, heartbeat, decisionEngine }) {
-  if (!enabledProtocols.has("pump")) {
-    throw new Error("No Solana protocols enabled. Set SOLANA_WATCH_PROTOCOLS=pump.");
-  }
-  if (SOLANA_STREAM_MODE !== "laserstream-wss") {
-    throw new Error("Unsupported SOLANA_STREAM_MODE=" + SOLANA_STREAM_MODE + ". Use laserstream-wss for the current implementation.");
-  }
-
-  let state = await readState();
-  let nextId = 1;
-  const checkBudget = makeBudgetChecker(budgetGuard);
+async function initializeRuntime({ streamMode, streamUrl, hooks, stockCache, checkBudget, rickAutoScan }) {
+  const state = await readState();
   await stockCache.get();
   await writeState(state);
-  const budget = await checkBudget({ force: true });
+  await checkBudgetAndWarn(() => checkBudget({ force: true }), hooks);
   logJson("listener_start", {
     mode: "solana-realtime",
-    streamMode: SOLANA_STREAM_MODE,
-    wsUrl: redactUrl(wsUrl),
-    httpUrl: redactUrl(httpUrl),
+    streamMode,
+    streamUrl: redactUrl(streamUrl),
     protocols: ["pump"],
     hasWebhook: hooks.length > 0,
-    interestingSymbols: [...includeSymbols],
-    ignoreSymbols: [...excludeSymbols],
+    rickAutoScan,
     statePath,
   });
-  if (budget?.crossedThreshold) {
-    warnJson("budget_threshold_crossed", { threshold: budget.crossedThreshold, estimatedUsd: budget.estimatedUsd });
-    await postStatusAlert(hooks, {
-      title: "Helius budget threshold crossed",
-      level: "warn",
-      service: "solana",
-      message: "Weekly budget crossed " + Math.round(budget.crossedThreshold * 100) + "%.",
-      fields: [
-        { name: "Estimated spend", value: "$" + Number(budget.estimatedUsd || 0).toFixed(2), inline: true },
-        { name: "Budget", value: "$" + Number(budget.weeklyBudgetUsd || 0).toFixed(2), inline: true },
-      ],
-    });
-  }
+  return state;
+}
+
+async function runWebSocketConnection(context) {
+  const { wsUrl, stockCache, hooks, checkBudget, heartbeat, decisionEngine, rickAutoScan } = context;
+  let state = await initializeRuntime({
+    streamMode: "standard-wss",
+    streamUrl: wsUrl,
+    hooks,
+    stockCache,
+    checkBudget,
+    rickAutoScan,
+  });
+  let nextId = 1;
+  const checkpoint = {
+    slot: Number(state.pumpLastSlot || 0),
+    signature: String(state.pumpLastSignature || ""),
+  };
+  const snapshot = () => ({
+    ...state,
+    pumpLastSlot: checkpoint.slot,
+    pumpLastSignature: checkpoint.signature,
+  });
+  const writer = makeCheckpointWriter(snapshot);
 
   await new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl, { handshakeTimeout: 10_000 });
     let settled = false;
+    let processing = Promise.resolve();
     const heartbeatTimer = setInterval(() => {
-      void heartbeat.tick().catch((err) => console.warn("heartbeat failed:", err.message));
+      void heartbeat.tick({ force: true }).catch((err) => console.warn("heartbeat failed:", err.message));
     }, HEARTBEAT_MS).unref();
     const pingTimer = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) ws.ping();
@@ -300,10 +357,9 @@ async function runConnection({ wsUrl, httpUrl, stockCache, hooks, budgetGuard, h
       }));
     });
 
-    ws.on("message", async (data) => {
+    ws.on("message", (data) => {
       heartbeat.message();
       const receivedNs = process.hrtime.bigint();
-      let trace = null;
       try {
         const msg = JSON.parse(String(data));
         if (msg.id && msg.result) {
@@ -312,69 +368,247 @@ async function runConnection({ wsUrl, httpUrl, stockCache, hooks, budgetGuard, h
         }
         if (msg.error) throw new Error(JSON.stringify(msg.error));
         const value = msg.params?.result?.value;
-        if (!value || value.err || !isPumpCreateLog(value.logs)) return;
+        const slot = msg.params?.result?.context?.slot;
+        if (!value) return;
+        if (Number(slot || 0) >= checkpoint.slot) {
+          checkpoint.slot = Number(slot || 0);
+          checkpoint.signature = value.signature || checkpoint.signature;
+          writer.schedule();
+        }
+        if (value.err || !isPumpCreateLog(value.logs)) return;
+        const event = decodePumpCreateEvent(value.logs);
+        if (!event) return;
         heartbeat.event();
-        trace = createLatencyTrace({
+        const trace = createLatencyTrace({
           chain: "solana",
           platform: "Pump.fun",
           signature: value.signature,
-          slot: msg.params?.result?.context?.slot,
+          slot,
+          source: "standard-wss",
         });
         trace.mark("received", { providerToHandlerMs: Number(msSince(receivedNs).toFixed(3)) });
-        const budget = await checkBudget();
-        if (budget?.crossedThreshold) {
-          await postStatusAlert(hooks, {
-            title: "Helius budget threshold crossed",
-            level: "warn",
-            service: "solana",
-            message: "Weekly budget crossed " + Math.round(budget.crossedThreshold * 100) + "%.",
-            fields: [
-              { name: "Estimated spend", value: "$" + Number(budget.estimatedUsd || 0).toFixed(2), inline: true },
-              { name: "Budget", value: "$" + Number(budget.weeklyBudgetUsd || 0).toFixed(2), inline: true },
-            ],
+        processing = processing.then(async () => {
+          await checkBudgetAndWarn(checkBudget, hooks);
+          state = await handlePumpCreate({
+            state: snapshot(),
+            event,
+            signature: value.signature,
+            slot,
+            stockCache,
+            hooks,
+            decisionEngine,
+            heartbeat,
+            trace,
+            rickAutoScan,
           });
-        }
-        state = await handlePumpSignature({
-          state,
-          signature: value.signature,
-          slot: msg.params?.result?.context?.slot,
-          httpUrl,
-          stockCache,
-          hooks,
-          decisionEngine,
-          heartbeat,
-          trace,
+          await writer.flush();
+          trace.done("handled");
+          await heartbeat.tick();
         });
-        await writeState(state);
-        trace.done("handled");
-        await heartbeat.tick();
+        void processing.catch((err) => {
+          heartbeat.error();
+          trace.done("error", { error: err.message });
+          console.warn("message handling failed:", err.stack || err.message);
+          finish(err);
+        });
       } catch (err) {
         heartbeat.error();
-        if (trace) trace.done("error", { error: err.message });
-        if (isBudgetStopError(err)) {
-          console.error(err.message);
-          finish(err);
-          return;
-        }
         console.warn("message handling failed:", err.stack || err.message);
       }
     });
 
     ws.on("ping", () => ws.pong());
+    ws.on("pong", () => heartbeat.message());
     ws.on("error", (err) => console.warn("websocket error:", err.message));
     ws.on("close", (code, reason) => {
       console.warn("websocket closed:", code, reason.toString());
-      finish();
+      void processing
+        .then(() => writer.flush())
+        .then(() => finish(), (err) => finish(err));
     });
   });
 }
 
+function makeCheckpointWriter(getSnapshot) {
+  let timer = null;
+  let writing = Promise.resolve();
+
+  function write() {
+    writing = writing.catch(() => {}).then(() => writeState(getSnapshot()));
+    return writing;
+  }
+
+  return {
+    schedule() {
+      if (timer) return;
+      timer = setTimeout(() => {
+        timer = null;
+        void write().catch((err) => console.warn("Solana checkpoint write failed:", err.message));
+      }, STATE_FLUSH_MS);
+      timer.unref();
+    },
+    async flush() {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      await write();
+    },
+  };
+}
+
+async function runLaserstreamConnection(context) {
+  const { stockCache, hooks, checkBudget, heartbeat, decisionEngine, rickAutoScan } = context;
+  const config = laserstreamConfigFromEnv();
+  let state = await initializeRuntime({
+    streamMode: "laserstream-grpc",
+    streamUrl: config.endpoint,
+    hooks,
+    stockCache,
+    checkBudget,
+    rickAutoScan,
+  });
+  const checkpoint = {
+    slot: Number(state.pumpLastSlot || 0),
+    signature: String(state.pumpLastSignature || ""),
+  };
+  const snapshot = () => ({
+    ...state,
+    pumpLastSlot: checkpoint.slot,
+    pumpLastSignature: checkpoint.signature,
+  });
+  const writer = makeCheckpointWriter(snapshot);
+  let processing = Promise.resolve();
+  const fromSlot = checkpoint.slot > 0 ? Math.max(0, checkpoint.slot - REPLAY_OVERLAP_SLOTS) : undefined;
+  const request = {
+    transactions: {
+      pump: {
+        accountInclude: [PUMP_PROGRAM],
+        accountExclude: [],
+        accountRequired: [],
+        vote: false,
+        failed: false,
+      },
+    },
+    commitment: CommitmentLevel.PROCESSED,
+    accounts: {},
+    slots: {},
+    transactionsStatus: {},
+    blocks: {},
+    blocksMeta: {},
+    entry: {},
+    accountsDataSlice: [],
+    ...(fromSlot === undefined ? {} : { fromSlot }),
+  };
+
+  let streamHandle = null;
+  let terminalSettled = false;
+  let resolveTerminal;
+  let rejectTerminal;
+  const terminal = new Promise((resolve, reject) => {
+    resolveTerminal = resolve;
+    rejectTerminal = reject;
+  });
+  const settleTerminal = (err) => {
+    if (terminalSettled) return;
+    terminalSettled = true;
+    streamHandle?.cancel();
+    if (err) rejectTerminal(err);
+    else resolveTerminal();
+  };
+  streamHandle = await subscribe(config, request, async (update) => {
+    const transactionUpdate = update?.transaction;
+    const info = transactionUpdate?.transaction;
+    if (!transactionUpdate || !info) return;
+    heartbeat.message();
+    const receivedNs = process.hrtime.bigint();
+    const slot = Number(transactionUpdate.slot || 0);
+    const signature = info.signature?.length ? bs58.encode(info.signature) : "";
+    const logs = info.meta?.logMessages || [];
+    const event = signature && isPumpCreateLog(logs) ? decodePumpCreateEvent(logs) : null;
+    const trace = event ? createLatencyTrace({
+      chain: "solana",
+      platform: "Pump.fun",
+      signature,
+      slot,
+      source: "laserstream-grpc",
+    }) : null;
+    if (trace) {
+      heartbeat.event();
+      trace.mark("received", { providerToHandlerMs: Number(msSince(receivedNs).toFixed(3)) });
+    }
+    processing = processing.then(async () => {
+      if (event) {
+        await checkBudgetAndWarn(checkBudget, hooks);
+        state = await handlePumpCreate({
+          state: snapshot(),
+          event,
+          signature,
+          slot,
+          stockCache,
+          hooks,
+          decisionEngine,
+          heartbeat,
+          trace,
+          rickAutoScan,
+        });
+      }
+      if (slot >= checkpoint.slot) {
+        checkpoint.slot = slot;
+        checkpoint.signature = signature || checkpoint.signature;
+      }
+      if (event) {
+        await writer.flush();
+        trace.done("handled");
+        await heartbeat.tick();
+      } else {
+        writer.schedule();
+      }
+    });
+    try {
+      await processing;
+    } catch (err) {
+      heartbeat.error();
+      trace?.done("error", { error: err.message });
+      if (isBudgetStopError(err)) {
+        console.error(err.message);
+        process.exitCode = 2;
+      } else {
+        console.warn("LaserStream handling failed:", err.stack || err.message);
+      }
+      settleTerminal(err);
+    }
+  }, async (err) => {
+    heartbeat.error();
+    console.warn("LaserStream connection error:", err.message);
+  });
+
+  logJson("subscribed", { protocol: "pump", streamMode: "laserstream-grpc", fromSlot: fromSlot || null });
+  const heartbeatTimer = setInterval(() => {
+    void heartbeat.tick({ force: true }).catch((err) => console.warn("heartbeat failed:", err.message));
+  }, HEARTBEAT_MS);
+
+  const shutdown = () => settleTerminal();
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  try {
+    await terminal;
+    await processing;
+  } finally {
+    clearInterval(heartbeatTimer);
+    process.off("SIGINT", shutdown);
+    process.off("SIGTERM", shutdown);
+    await writer.flush();
+  }
+}
+
 async function main() {
+  if (!enabledProtocols.has("pump")) throw new Error("No Solana protocols enabled. Set SOLANA_WATCH_PROTOCOLS=pump.");
   const httpUrl = solanaHttpUrlFromEnv();
-  const wsUrl = solanaWsUrlFromEnv();
+  const wsUrl = solanaWsUrlFromEnv(httpUrl);
   const hooks = webhooksFromEnv();
   const stockCache = makeStockCache();
   const budgetGuard = await createBudgetGuard({ statePath: budgetStatePath, killSwitchPath });
+  const checkBudget = makeBudgetChecker(budgetGuard);
+  const rickAutoScan = boolEnv("RICK_AUTOSCAN");
   const heartbeat = createHeartbeat({
     service: "solana",
     intervalMs: HEARTBEAT_MS,
@@ -383,7 +617,7 @@ async function main() {
       title: "Solana listener stale",
       level: "warn",
       service: "solana",
-      message: "No WebSocket messages observed within the stale threshold.",
+      message: "No stream messages observed within the stale threshold.",
       fields: [
         { name: "Last message age ms", value: String(lastMessageAgeMs), inline: true },
         { name: "Threshold ms", value: String(staleMs), inline: true },
@@ -391,10 +625,22 @@ async function main() {
     }),
   });
   const decisionEngine = createDryRunDecisionEngine();
+
+  if (SOLANA_STREAM_MODE === "laserstream-grpc") {
+    await runLaserstreamConnection({ stockCache, hooks, checkBudget, heartbeat, decisionEngine, rickAutoScan });
+    return;
+  }
+
+  if (!["standard-wss", "laserstream-wss"].includes(SOLANA_STREAM_MODE)) {
+    throw new Error("Unsupported SOLANA_STREAM_MODE=" + SOLANA_STREAM_MODE + ". Use standard-wss or laserstream-grpc.");
+  }
+  if (SOLANA_STREAM_MODE === "laserstream-wss") {
+    console.warn("SOLANA_STREAM_MODE=laserstream-wss is a legacy alias for standard-wss and has no replay; use laserstream-grpc after upgrading Helius.");
+  }
   let attempt = 0;
   for (;;) {
     try {
-      await runConnection({ wsUrl, httpUrl, stockCache, hooks, budgetGuard, heartbeat, decisionEngine });
+      await runWebSocketConnection({ wsUrl, stockCache, hooks, checkBudget, heartbeat, decisionEngine, rickAutoScan });
       attempt += 1;
     } catch (err) {
       if (isBudgetStopError(err)) {
@@ -412,5 +658,5 @@ async function main() {
 
 main().catch((err) => {
   console.error(err.stack || err.message);
-  process.exit(1);
+  process.exit(isBudgetStopError(err) ? 2 : 1);
 });

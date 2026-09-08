@@ -20,7 +20,7 @@ export function warnJson(event, data = {}) {
   console.warn(JSON.stringify({ event, ts: isoNow(), ...data }));
 }
 
-export function createLatencyTrace({ chain, platform, tx, signature, slot, block }) {
+export function createLatencyTrace({ chain, platform, tx, signature, slot, block, source }) {
   const startedNs = nowNs();
   const marks = [];
   return {
@@ -38,6 +38,7 @@ export function createLatencyTrace({ chain, platform, tx, signature, slot, block
         signature,
         slot,
         block,
+        source,
         outcome,
         totalMs: Number(msSince(startedNs).toFixed(3)),
         marks,
