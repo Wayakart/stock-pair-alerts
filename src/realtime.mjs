@@ -30,7 +30,7 @@ import {
   buildStatusEmbed,
   emptyState,
   csvSet,
-  uniqueWebhookUrls,
+  discordWebhookUrls,
   isInterestingAsset,
   normalizeAddr,
   redactUrl,
@@ -186,7 +186,7 @@ function httpUrlFromEnv(wsUrl) {
 }
 
 function webhooksFromEnv() {
-  return uniqueWebhookUrls([process.env.DISCORD_WEBHOOK_URL, process.env.DISCORD_WEBHOOK_URL_2]);
+  return discordWebhookUrls(process.env);
 }
 
 async function reserveTokenAlert(alert) {

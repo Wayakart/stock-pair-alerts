@@ -41,6 +41,7 @@ import {
   applyO1Quotes,
   csvSet,
   uniqueWebhookUrls,
+  discordWebhookUrls,
   isInterestingAsset,
   isInterestingSolanaAsset,
   PUMP_PROGRAM,
@@ -544,6 +545,16 @@ test("uniqueWebhookUrls removes duplicate Discord destinations", () => {
     "http://discord.com/api/webhooks/2/token",
     "",
   ]), ["https://discord.com/api/webhooks/1/token"]);
+});
+
+test("discordWebhookUrls requires an explicit opt-in", () => {
+  const webhook = "https://discord.com/api/webhooks/123/token";
+  assert.deepEqual(discordWebhookUrls({ DISCORD_WEBHOOK_URL: webhook }), []);
+  assert.deepEqual(discordWebhookUrls({
+    DISCORD_ALERTS_ENABLED: "1",
+    DISCORD_WEBHOOK_URL: webhook,
+    DISCORD_WEBHOOK_URL_2: `${webhook}/`,
+  }), [webhook]);
 });
 
 test("isInterestingAsset supports symbol and address allowlists", () => {

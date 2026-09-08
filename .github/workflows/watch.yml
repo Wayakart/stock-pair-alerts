@@ -30,11 +30,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - run: npm ci
       - run: node --test
       - name: Poll
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_WEBHOOK_URL_2: ${{ secrets.DISCORD_WEBHOOK_URL_2 }}
+          DISCORD_ALERTS_ENABLED: ${{ vars.DISCORD_ALERTS_ENABLED || '0' }}
           RPC_URL: ${{ secrets.RPC_URL }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
           TEST_PING: ${{ github.event.inputs.test_ping }}

@@ -106,6 +106,7 @@ Environment variables:
 
 - `DISCORD_WEBHOOK_URL`: Discord webhook to post alerts.
 - `DISCORD_WEBHOOK_URL_2`: optional second Discord webhook.
+- `DISCORD_ALERTS_ENABLED`: explicit Discord delivery switch. Defaults off; set to `1` only after shadow verification.
 - `REALTIME_RPC_WS_URL`: QuickNode Robinhood Chain WebSocket RPC URL. Required for production.
 - `REALTIME_RPC_HTTP_URL`: optional QuickNode HTTP URL. When omitted it is derived from the WebSocket URL and used only for reconnect backfill, ERC-20 metadata, and Pair launch receipts.
 - `REQUIRE_QUICKNODE_ROBINHOOD`: set to `1` in production so a non-QuickNode Robinhood URL is rejected.

@@ -44,6 +44,7 @@ jobs:
           cat > /tmp/stock-pair-alerts.env <<ENV
           DISCORD_WEBHOOK_URL=${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_WEBHOOK_URL_2=${{ secrets.DISCORD_WEBHOOK_URL_2 }}
+          DISCORD_ALERTS_ENABLED=${{ vars.DISCORD_ALERTS_ENABLED || '0' }}
           REALTIME_RPC_WS_URL=${{ secrets.QUICKNODE_ROBINHOOD_WS_URL }}
           REQUIRE_QUICKNODE_ROBINHOOD=1
           ALLOW_PUBLIC_ROBINHOOD_RPC=0

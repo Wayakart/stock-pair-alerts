@@ -203,6 +203,14 @@ export function uniqueWebhookUrls(values) {
   return urls;
 }
 
+export function discordWebhookUrls(env = process.env) {
+  const enabled = ["1", "true", "yes", "on"].includes(
+    String(env.DISCORD_ALERTS_ENABLED || "").trim().toLowerCase()
+  );
+  if (!enabled) return [];
+  return uniqueWebhookUrls([env.DISCORD_WEBHOOK_URL, env.DISCORD_WEBHOOK_URL_2]);
+}
+
 export function isInterestingAsset({ address, symbol }, {
   includeSymbols = new Set(),
   excludeSymbols = new Set(),
