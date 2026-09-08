@@ -31,6 +31,8 @@ The realtime services use separate runtime state files:
 - `state/robinhood.json`: Robinhood Chain seen pairs.
 - `state/robinhood-events.ndjson`: append-only Robinhood candidate, normalized trade, qualification, and milestone history for later tuning.
 - `state/solana.json`: Solana/Pump seen stock-mint launches.
+- `state/alert-cap.json`: shared rolling token-alert reservations across both realtime services.
+- `state/alert-events.ndjson`: append-only history of allowed and cap-suppressed token alerts.
 - `state/budget.json`: Helius budget telemetry.
 - `state/KILL_SWITCH`: manual or automatic stop file for the Solana budget guard.
 
@@ -121,6 +123,10 @@ Environment variables:
 - `MOMENTUM_WALLET_FALLBACK_BUYERS`: wallet trigger used only when the USD price is unavailable. Defaults to `8`.
 - `MOMENTUM_SUBSCRIPTION_REFRESH_MS`: candidate expiry and pool-subscription reconciliation interval. Defaults to `30000`.
 - `MOMENTUM_HISTORY_PATH`: optional override for the append-only NDJSON history path.
+- `ALERT_CAP_MAX`: maximum token alerts shared by Robinhood and Solana during the rolling window. Defaults to `10`.
+- `ALERT_CAP_WINDOW_MS`: rolling Discord token-alert window. Defaults to `28800000` (8 hours).
+- `ALERT_CAP_STATE_PATH`: optional override for the shared alert-cap ledger.
+- `ALERT_CAP_HISTORY_PATH`: optional override for the allowed and suppressed alert history.
 - `SOLANA_RPC_HTTP_URL`: paid Solana HTTP RPC URL used for provider access and operational recovery. Pump create alerts decode directly from stream logs on the hot path.
 - `SOLANA_RPC_WS_URL`: paid Solana WebSocket RPC URL for Pump program logs. Required for production.
 - `SOLANA_WATCH_PROTOCOLS`: comma-separated Solana protocol ids. Defaults to `pump`.

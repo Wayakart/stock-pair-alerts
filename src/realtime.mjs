@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import { createAlertCap } from "./alert-cap.mjs";
 import { createBudgetGuard, isBudgetStopError } from "./budget.mjs";
 import { createDryRunDecisionEngine } from "./decision.mjs";
 import {
@@ -56,6 +57,8 @@ const statePath = path.join(root, "state", "robinhood.json");
 const budgetStatePath = path.resolve(process.env.BUDGET_STATE_PATH || path.join(root, "state", "budget.json"));
 const killSwitchPath = path.resolve(process.env.KILL_SWITCH_PATH || path.join(root, "state", "KILL_SWITCH"));
 const momentumHistoryPath = path.resolve(process.env.MOMENTUM_HISTORY_PATH || path.join(root, "state", "robinhood-events.ndjson"));
+const alertCapStatePath = path.resolve(process.env.ALERT_CAP_STATE_PATH || path.join(root, "state", "alert-cap.json"));
+const alertCapHistoryPath = path.resolve(process.env.ALERT_CAP_HISTORY_PATH || path.join(root, "state", "alert-events.ndjson"));
 const UA = "stock-pair-alerts/1.6";
 const DEFAULT_WS = "wss://rpc-robinhood.blockmachine.io";
 const RH_REFRESH_MS = Number(process.env.RH_REFRESH_MS || 300_000);
@@ -66,6 +69,8 @@ const BACKFILL_CHUNK = BigInt(process.env.EVM_BACKFILL_CHUNK || 2_000);
 const BACKFILL_OVERLAP_BLOCKS = BigInt(process.env.EVM_BACKFILL_OVERLAP_BLOCKS || 32);
 const BOOTSTRAP_LOOKBACK_BLOCKS = BigInt(process.env.EVM_BOOTSTRAP_LOOKBACK_BLOCKS || 100_000);
 const MOMENTUM_SUBSCRIPTION_REFRESH_MS = Math.max(1_000, Number(process.env.MOMENTUM_SUBSCRIPTION_REFRESH_MS || 30_000));
+const ALERT_CAP_MAX = Number(process.env.ALERT_CAP_MAX || 10);
+const ALERT_CAP_WINDOW_MS = Number(process.env.ALERT_CAP_WINDOW_MS || 8 * 60 * 60 * 1_000);
 const ERC20_NAME_SELECTOR = "0x06fdde03";
 const ERC20_SYMBOL_SELECTOR = "0x95d89b41";
 const ERC20_TOTAL_SUPPLY_SELECTOR = "0x18160ddd";
@@ -122,6 +127,12 @@ const excludeSymbols = csvSet(process.env.IGNORE_SYMBOLS, { normalize: (value) =
 const includeAddresses = csvSet(process.env.INTERESTING_ADDRESSES, { normalize: normalizeAddr });
 const excludeAddresses = csvSet(process.env.IGNORE_ADDRESSES, { normalize: normalizeAddr });
 const interestingOptions = { includeSymbols, excludeSymbols, includeAddresses, excludeAddresses };
+const alertCap = createAlertCap({
+  statePath: alertCapStatePath,
+  historyPath: alertCapHistoryPath,
+  maxAlerts: ALERT_CAP_MAX,
+  windowMs: ALERT_CAP_WINDOW_MS,
+});
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -176,6 +187,27 @@ function httpUrlFromEnv(wsUrl) {
 
 function webhooksFromEnv() {
   return uniqueWebhookUrls([process.env.DISCORD_WEBHOOK_URL, process.env.DISCORD_WEBHOOK_URL_2]);
+}
+
+async function reserveTokenAlert(alert) {
+  const result = await alertCap.reserve({
+    chain: alert.chain,
+    platform: alert.platform,
+    projectAddress: alert.projectAddress,
+    projectSymbol: alert.projectSymbol,
+    tx: alert.tx,
+  });
+  logJson(result.allowed ? "alert_cap_reserved" : "alert_cap_suppressed", {
+    chain: alert.chain,
+    platform: alert.platform,
+    projectAddress: alert.projectAddress,
+    projectSymbol: alert.projectSymbol,
+    used: result.used,
+    remaining: result.remaining,
+    maxAlerts: result.maxAlerts,
+    windowMs: result.windowMs,
+  });
+  return result;
 }
 
 function makeBudgetChecker(budgetGuard) {
@@ -564,6 +596,7 @@ async function handleMomentumLog(context) {
   });
 
   if (result.shouldNotify) {
+    let discordAction = "not_attempted";
     const existingMessage = Object.values(candidates).find((item) =>
       item.poolId !== candidate.poolId &&
       item.project.address === candidate.project.address &&
@@ -575,26 +608,37 @@ async function handleMomentumLog(context) {
       try {
         await updateNotifications(hooks, candidate.discordMessageIds, buildDiscordAlertPayload(alert));
         context.trace?.mark("alert_updated");
+        discordAction = "updated_existing_token";
       } catch (err) {
         console.warn("momentum cross-pool update failed:", err.message);
+        discordAction = "update_failed";
       }
     } else {
-      await decisionEngine.evaluate(alert, {
-        receivedToDecisionMs: context.trace?.elapsedMs(),
-        reason: result.reasons.join(", "),
-      });
       console.log(JSON.stringify({ alert }));
       if (!hooks.length) {
         console.warn("qualified momentum alert ready but DISCORD_WEBHOOK_URL is not set");
+        discordAction = "webhook_not_configured";
       } else {
-        try {
-          candidate.discordMessageIds = await notify(hooks, buildDiscordAlertPayload(alert, {
-            rickAutoScan: context.rickAutoScan,
-          }), { wait: true });
-          heartbeat?.alert();
-          context.trace?.mark("alert_sent");
-        } catch (err) {
-          console.warn("momentum notify failed:", err.message);
+        const reservation = await reserveTokenAlert(alert);
+        if (!reservation.allowed) {
+          discordAction = "suppressed_alert_cap";
+          context.trace?.mark("alert_suppressed");
+        } else {
+          await decisionEngine.evaluate(alert, {
+            receivedToDecisionMs: context.trace?.elapsedMs(),
+            reason: result.reasons.join(", "),
+          });
+          try {
+            candidate.discordMessageIds = await notify(hooks, buildDiscordAlertPayload(alert, {
+              rickAutoScan: context.rickAutoScan,
+            }), { wait: true });
+            heartbeat?.alert();
+            context.trace?.mark("alert_sent");
+            discordAction = "created";
+          } catch (err) {
+            console.warn("momentum notify failed:", err.message);
+            discordAction = "notify_failed";
+          }
         }
       }
     }
@@ -605,7 +649,7 @@ async function handleMomentumLog(context) {
       reasons: result.reasons,
       metrics: result.metrics,
       tx: trade.tx,
-      discordAction: existingMessage ? "updated_existing_token" : "created",
+      discordAction,
     });
   } else if (result.shouldUpdate) {
     const reasons = result.newMilestones.map((level) => "$" + (level / 1_000) + "k estimated FDV");
@@ -635,12 +679,18 @@ async function handleMomentumLog(context) {
 }
 
 async function sendAlert({ hooks, alert, decisionEngine, trace, heartbeat, rickAutoScan }) {
-  await decisionEngine.evaluate(alert, { receivedToDecisionMs: trace.elapsedMs() });
   console.log(JSON.stringify({ alert }));
   if (!hooks.length) {
+    await decisionEngine.evaluate(alert, { receivedToDecisionMs: trace.elapsedMs() });
     console.warn("alert ready but DISCORD_WEBHOOK_URL is not set");
     return;
   }
+  const reservation = await reserveTokenAlert(alert);
+  if (!reservation.allowed) {
+    trace.mark("alert_suppressed");
+    return;
+  }
+  await decisionEngine.evaluate(alert, { receivedToDecisionMs: trace.elapsedMs() });
   try {
     await notify(hooks, buildDiscordAlertPayload(alert, { rickAutoScan }));
     heartbeat?.alert();

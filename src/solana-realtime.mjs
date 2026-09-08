@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import bs58 from "bs58";
 import { CommitmentLevel, subscribe } from "helius-laserstream";
 import WebSocket from "ws";
+import { createAlertCap } from "./alert-cap.mjs";
 import { createBudgetGuard, isBudgetStopError } from "./budget.mjs";
 import { createDryRunDecisionEngine } from "./decision.mjs";
 import {
@@ -28,6 +29,8 @@ const legacyStatePath = path.join(root, "state", "seen.json");
 const statePath = path.join(root, "state", "solana.json");
 const budgetStatePath = path.resolve(process.env.BUDGET_STATE_PATH || path.join(root, "state", "budget.json"));
 const killSwitchPath = path.resolve(process.env.KILL_SWITCH_PATH || path.join(root, "state", "KILL_SWITCH"));
+const alertCapStatePath = path.resolve(process.env.ALERT_CAP_STATE_PATH || path.join(root, "state", "alert-cap.json"));
+const alertCapHistoryPath = path.resolve(process.env.ALERT_CAP_HISTORY_PATH || path.join(root, "state", "alert-events.ndjson"));
 const UA = "stock-pair-alerts/1.6";
 const DEFAULT_SOLANA_RPC_HTTP = "https://api.mainnet-beta.solana.com";
 const DEFAULT_SOLANA_RPC_WS = "wss://api.mainnet-beta.solana.com";
@@ -41,6 +44,8 @@ const HEARTBEAT_MS = Number(process.env.HEARTBEAT_MS || 60_000);
 const STALE_CONNECTION_MS = Number(process.env.STALE_CONNECTION_MS || 180_000);
 const STATE_FLUSH_MS = Number(process.env.SOLANA_STATE_FLUSH_MS || 1_000);
 const REPLAY_OVERLAP_SLOTS = Number(process.env.SOLANA_REPLAY_OVERLAP_SLOTS || 128);
+const ALERT_CAP_MAX = Number(process.env.ALERT_CAP_MAX || 10);
+const ALERT_CAP_WINDOW_MS = Number(process.env.ALERT_CAP_WINDOW_MS || 8 * 60 * 60 * 1_000);
 const SOLANA_STREAM_MODE = process.env.SOLANA_STREAM_MODE || "standard-wss";
 
 const enabledProtocols = csvSet(process.env.SOLANA_WATCH_PROTOCOLS || "pump");
@@ -49,6 +54,12 @@ const excludeSymbols = csvSet(process.env.IGNORE_SYMBOLS, { normalize: (value) =
 const includeAddresses = csvSet(process.env.INTERESTING_ADDRESSES, { normalize: (value) => value });
 const excludeAddresses = csvSet(process.env.IGNORE_ADDRESSES, { normalize: (value) => value });
 const interestingOptions = { includeSymbols, excludeSymbols, includeAddresses, excludeAddresses };
+const alertCap = createAlertCap({
+  statePath: alertCapStatePath,
+  historyPath: alertCapHistoryPath,
+  maxAlerts: ALERT_CAP_MAX,
+  windowMs: ALERT_CAP_WINDOW_MS,
+});
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -85,6 +96,27 @@ function laserstreamConfigFromEnv() {
 
 function webhooksFromEnv() {
   return uniqueWebhookUrls([process.env.DISCORD_WEBHOOK_URL, process.env.DISCORD_WEBHOOK_URL_2]);
+}
+
+async function reserveTokenAlert(alert) {
+  const result = await alertCap.reserve({
+    chain: alert.chain,
+    platform: alert.platform,
+    projectAddress: alert.projectAddress,
+    projectSymbol: alert.projectSymbol,
+    tx: alert.tx,
+  });
+  logJson(result.allowed ? "alert_cap_reserved" : "alert_cap_suppressed", {
+    chain: alert.chain,
+    platform: alert.platform,
+    projectAddress: alert.projectAddress,
+    projectSymbol: alert.projectSymbol,
+    used: result.used,
+    remaining: result.remaining,
+    maxAlerts: result.maxAlerts,
+    windowMs: result.windowMs,
+  });
+  return result;
 }
 
 async function readState() {
@@ -234,12 +266,18 @@ async function handlePumpCreate(context) {
     tx: signature,
     extra: "Pump CreateEvent used a tracked Solana stock mint as its quote asset.",
   };
-  await decisionEngine.evaluate(alert, { receivedToDecisionMs: trace.elapsedMs() });
   console.log(JSON.stringify({ alert }));
   if (!hooks.length) {
+    await decisionEngine.evaluate(alert, { receivedToDecisionMs: trace.elapsedMs() });
     console.warn("alert ready but DISCORD_WEBHOOK_URL is not set");
     return next;
   }
+  const reservation = await reserveTokenAlert(alert);
+  if (!reservation.allowed) {
+    trace.mark("alert_suppressed");
+    return next;
+  }
+  await decisionEngine.evaluate(alert, { receivedToDecisionMs: trace.elapsedMs() });
   try {
     await notify(hooks, buildDiscordAlertPayload(alert, { rickAutoScan }));
     heartbeat.alert();
