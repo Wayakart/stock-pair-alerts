@@ -66,6 +66,16 @@ jobs:
           QUICKNODE_EXTRA_CREDIT_USD_PER_MILLION=${{ vars.QUICKNODE_EXTRA_CREDIT_USD_PER_MILLION || '0.56' }}
           QUICKNODE_ADMIN_API_KEY=${{ secrets.QUICKNODE_ADMIN_API_KEY }}
           REQUIRE_QUICKNODE_BUDGET_API=1
+          BASE_LISTENER_ENABLED=${{ vars.BASE_LISTENER_ENABLED || '0' }}
+          BASE_RPC_HTTP_URL=${{ secrets.QUICKNODE_BASE_HTTP_URL }}
+          BASE_RPC_WS_URL=${{ secrets.QUICKNODE_BASE_WS_URL }}
+          BASE_STREAM_MODE=${{ vars.BASE_STREAM_MODE || 'pending-logs' }}
+          BASE_WATCH_PROTOCOLS=uniswap-v4,uniswap-v3,uniswap-v2,aerodrome,aerodrome-slipstream
+          BASE_BOOTSTRAP_LOOKBACK_BLOCKS=100000
+          BASE_BACKFILL_OVERLAP_BLOCKS=32
+          BASE_BACKFILL_CHUNK=2000
+          REQUIRE_QUICKNODE_BASE=1
+          ALLOW_PUBLIC_BASE_RPC=0
           SOLANA_RPC_HTTP_URL=${{ secrets.HELIUS_RPC_HTTP_URL }}
           SOLANA_RPC_WS_URL=${{ secrets.HELIUS_RPC_WS_URL }}
           SOLANA_WATCH_PROTOCOLS=pump
@@ -168,6 +178,35 @@ jobs:
           WantedBy=multi-user.target
           SERVICE
             sed -i "s/^          //" /etc/systemd/system/stock-pair-solana.service
+            cat > /etc/systemd/system/stock-pair-base.service <<SERVICE
+          [Unit]
+          Description=Stock Pair Alerts Base VVV shadow listener
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=stockalerts
+          Group=stockalerts
+          WorkingDirectory=/opt/stock-pair-alerts
+          EnvironmentFile=/etc/stock-pair-alerts/env
+          ExecCondition=/usr/bin/test \$BASE_LISTENER_ENABLED = 1
+          ExecStart=/usr/bin/npm run base-realtime
+          Restart=always
+          RestartSec=2
+          RestartPreventExitStatus=2
+          StateDirectory=stock-pair-alerts
+          LogsDirectory=stock-pair-alerts
+          NoNewPrivileges=true
+          PrivateTmp=true
+          ProtectSystem=strict
+          ProtectHome=true
+          ReadWritePaths=/opt/stock-pair-alerts/state /var/lib/stock-pair-alerts /var/log/stock-pair-alerts
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+            sed -i "s/^          //" /etc/systemd/system/stock-pair-base.service
             systemctl daemon-reload
           '
 
@@ -179,8 +218,8 @@ jobs:
             cd /opt/stock-pair-alerts
             npm test
             if [ "${{ inputs.restart_services }}" = "true" ]; then
-              systemctl enable --now stock-pair-robinhood.service stock-pair-solana.service
-              systemctl restart stock-pair-robinhood.service stock-pair-solana.service
+              systemctl enable --now stock-pair-robinhood.service stock-pair-solana.service stock-pair-base.service
+              systemctl restart stock-pair-robinhood.service stock-pair-solana.service stock-pair-base.service
             fi
-            systemctl --no-pager --full status stock-pair-robinhood.service stock-pair-solana.service || true
+            systemctl --no-pager --full status stock-pair-robinhood.service stock-pair-solana.service stock-pair-base.service || true
           '

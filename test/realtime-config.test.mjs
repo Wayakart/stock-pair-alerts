@@ -117,3 +117,106 @@ test("Robinhood realtime listener fails closed without required QuickNode teleme
     }
   );
 });
+
+test("Base realtime listener requires an explicit production WebSocket", async () => {
+  const env = { ...process.env };
+  delete env.BASE_RPC_WS_URL;
+  delete env.ALLOW_PUBLIC_BASE_RPC;
+
+  await assert.rejects(
+    () => execFileAsync(process.execPath, ["src/base-realtime.mjs"], {
+      cwd: new URL("..", import.meta.url),
+      env,
+      timeout: 5_000,
+    }),
+    (err) => {
+      assert.equal(err.code, 1);
+      assert.match(err.stderr, /BASE_RPC_WS_URL is required/);
+      return true;
+    }
+  );
+});
+
+test("Base realtime listener can require a QuickNode endpoint", async () => {
+  const env = {
+    ...process.env,
+    BASE_RPC_WS_URL: "wss://example.com/not-quicknode",
+    REQUIRE_QUICKNODE_BASE: "1",
+  };
+  delete env.ALLOW_PUBLIC_BASE_RPC;
+
+  await assert.rejects(
+    () => execFileAsync(process.execPath, ["src/base-realtime.mjs"], {
+      cwd: new URL("..", import.meta.url),
+      env,
+      timeout: 5_000,
+    }),
+    (err) => {
+      assert.equal(err.code, 1);
+      assert.match(err.stderr, /must be a QuickNode Base WebSocket URL/);
+      return true;
+    }
+  );
+});
+
+test("Base realtime listener can require a QuickNode HTTP endpoint", async () => {
+  const env = {
+    ...process.env,
+    BASE_RPC_WS_URL: "wss://test.base-mainnet.quiknode.pro/token/",
+    BASE_RPC_HTTP_URL: "https://mainnet.base.org",
+    REQUIRE_QUICKNODE_BASE: "1",
+  };
+  delete env.ALLOW_PUBLIC_BASE_RPC;
+
+  await assert.rejects(
+    () => execFileAsync(process.execPath, ["src/base-realtime.mjs"], {
+      cwd: new URL("..", import.meta.url),
+      env,
+      timeout: 5_000,
+    }),
+    (err) => {
+      assert.equal(err.code, 1);
+      assert.match(err.stderr, /BASE_RPC_HTTP_URL must be a QuickNode Base HTTP URL/);
+      return true;
+    }
+  );
+});
+
+test("Base realtime listener exits when the shared kill switch is active", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "stock-pair-alerts-base-"));
+  const killSwitchPath = path.join(dir, "KILL_SWITCH");
+  await fs.writeFile(killSwitchPath, "manual stop\n");
+  const env = {
+    ...process.env,
+    BASE_RPC_WS_URL: "wss://test.base-mainnet.quiknode.pro/token/",
+    REQUIRE_QUICKNODE_BASE: "1",
+    BASE_STATE_PATH: path.join(dir, "base.json"),
+    BASE_HISTORY_PATH: path.join(dir, "base.ndjson"),
+    BUDGET_STATE_PATH: path.join(dir, "budget.json"),
+    KILL_SWITCH_PATH: killSwitchPath,
+    HELIUS_MONTHLY_PLAN_USD: "0",
+    QUICKNODE_MONTHLY_PLAN_USD: "0",
+    DIGITALOCEAN_MONTHLY_USD: "0",
+    DIGITALOCEAN_MONTHLY_HARD_CAP_USD: "0",
+    HELIUS_API_KEY: "",
+    HELIUS_PROJECT_ID: "",
+    REQUIRE_HELIUS_BUDGET_API: "",
+    QUICKNODE_ADMIN_API_KEY: "",
+    REQUIRE_QUICKNODE_BUDGET_API: "",
+    DIGITALOCEAN_BILLING_TOKEN: "",
+    REQUIRE_DIGITALOCEAN_BUDGET_API: "",
+  };
+
+  await assert.rejects(
+    () => execFileAsync(process.execPath, ["src/base-realtime.mjs"], {
+      cwd: new URL("..", import.meta.url),
+      env,
+      timeout: 5_000,
+    }),
+    (err) => {
+      assert.equal(err.code, 2);
+      assert.match(err.stderr, /base realtime listener stopped: kill switch active/);
+      return true;
+    }
+  );
+});

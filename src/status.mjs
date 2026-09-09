@@ -41,6 +41,7 @@ async function main() {
   const legacy = await readJsonFile("state/seen.json", {});
   const robinhood = await readJsonFile("state/robinhood.json", legacy);
   const solana = await readJsonFile("state/solana.json", legacy);
+  const base = await readJsonFile("state/base.json", {});
   const budgetState = await readJsonFile("state/budget.json", {});
   const [heliusUsage, quicknodeUsage, quicknodeInvoices, digitalOceanBalance] = await Promise.all([
     fetchHeliusUsage({
@@ -93,6 +94,7 @@ async function main() {
       pairLaunches: robinhood.pairLaunches?.length || 0,
       pairPools: robinhood.pairPools?.length || 0,
       pumpStockLaunches: solana.pumpStockLaunches?.length || 0,
+      baseVvvPools: Object.keys(base.seenPools || {}).length,
     },
     helius: {
       plan: heliusUsage?.subscriptionDetails?.plan,
