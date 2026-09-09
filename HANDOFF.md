@@ -2,10 +2,11 @@
 
 ## Objective
 
-Turn this repository into a low-latency monitor for two distinct signals:
+Turn this repository into a low-latency monitor for three distinct signals:
 
 1. A genuinely new tokenized equity appears on Robinhood Chain or Solana.
 2. A tokenized equity receives its first market or launchpad pair.
+3. A new pool on a supported Base venue pairs any token with the official Venice VVV contract.
 
 Do not treat every meme token paired with an existing stock as a new equity. Keep meme/project momentum analysis as internal research or route it to a separate channel later.
 
@@ -27,6 +28,7 @@ Do not treat every meme token paired with an existing stock as a new equity. Kee
 - Services:
   - `stock-pair-robinhood.service`
   - `stock-pair-solana.service`
+  - `stock-pair-base.service`
 - Deployment workflow: `.github/workflows/deploy-digitalocean.yml`
 - Deployment is manual. A push to `main` does not automatically restart production.
 
@@ -34,13 +36,14 @@ Use GitHub Actions secrets and variables already named in the deployment workflo
 
 ## Current Production Status
 
-Last checked 2026-09-08:
+Last checked 2026-09-09:
 
 - Robinhood service: active.
 - Solana service: failed closed at 2026-09-08 12:25 UTC.
 - Solana failure: `budget telemetry unavailable: fetch failed` while required provider billing telemetry was unreachable. The `$1,000` budget was not exhausted.
 - Discord webhook values on the droplet: empty.
 - Solana was running `SOLANA_STREAM_MODE=standard-wss` and `SOLANA_WATCH_PROTOCOLS=pump` before it stopped.
+- Base listener: implemented on branch `base-vvv-listener`, not deployed or started. The deployment gate defaults to `BASE_LISTENER_ENABLED=0` and requires separate paid Base HTTP/WSS endpoints.
 
 Do not weaken the fail-closed budget policy without replacing it with bounded retry/grace behavior and tests. A transient telemetry outage should not silently remove spend protection.
 
@@ -67,12 +70,23 @@ Do not weaken the fail-closed budget policy without replacing it with bounded re
 - Solana slot/signature checkpoints and reconnect replay for LaserStream.
 - StonkFun catalog source: `https://www.stonkfun.xyz/api/public/v1/pairs?launchable=true`.
 
+### Base
+
+- Official VVV CA: `0xacfE6019Ed1A7Dc6f7B508C02d1b04ec88cC21bf`.
+- Filtered WebSocket subscriptions for Uniswap V4, Uniswap V3, Uniswap V2, Aerodrome AMM, and all three official Aerodrome Slipstream factories.
+- Supports standard sealed logs and Flashblocks `pendingLogs` without polling.
+- Persists raw matches before metadata enrichment in `state/base-events.ndjson` and deduplicates in `state/base.json`.
+- Reconnect backfill subscribes first, then replays a persisted 32-block overlap.
+- `pending-logs` mode also subscribes to sealed logs so each fast preconfirmation is explicitly marked confirmed.
+- No Discord or Rick code path exists for Base during shadow collection.
+- Uses the same QuickNode telemetry, `$1,000` budget state, and kill switch as the other listeners.
+
 ### Operations
 
 - Persistent state and NDJSON event history.
 - Shared alert cap: ten token alerts per rolling eight hours.
 - Provider telemetry for QuickNode, Helius, and DigitalOcean.
-- Weekly `$1,000` kill switch and DigitalOcean configured hard-cap check.
+- Weekly `$1,000` kill switch and DigitalOcean configured hard-cap check shared by all three listeners.
 - URL redaction, status command, provider benchmarks, and focused tests.
 
 ## Important Coverage Gaps
@@ -138,6 +152,7 @@ Do not classify every Sunrise entry as an equity. That group also contains non-e
 - CPI/inner instructions and versioned transaction loaded addresses decode correctly.
 - Replay and reconnect do not duplicate events.
 - Discord and Rick make zero requests while `DISCORD_ALERTS_ENABLED=0`.
+- Base records only pools containing the official VVV CA and never posts to Discord during shadow mode.
 - Budget telemetry outages remain visible and bounded without allowing unmonitored spend.
 - Tests and syntax checks pass before deployment.
 
@@ -150,6 +165,7 @@ npm ci
 npm test
 node --check src/realtime.mjs
 node --check src/solana-realtime.mjs
+node --check src/base-realtime.mjs
 node --check src/watch.mjs
 ```
 
@@ -157,7 +173,7 @@ Production inspection:
 
 ```bash
 ssh -i ~/.ssh/stock_pair_do root@167.172.131.186
-systemctl status stock-pair-robinhood.service stock-pair-solana.service
+systemctl status stock-pair-robinhood.service stock-pair-solana.service stock-pair-base.service
 journalctl -u stock-pair-solana.service -f
 cd /opt/stock-pair-alerts
 npm run status -- --env /etc/stock-pair-alerts/env

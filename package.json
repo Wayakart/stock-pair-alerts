@@ -5,6 +5,8 @@
   "scripts": {
     "watch": "node src/watch.mjs",
     "realtime": "node src/realtime.mjs",
+    "base-realtime": "node src/base-realtime.mjs",
+    "base-backfill": "node src/base-realtime.mjs --backfill-only",
     "solana-realtime": "node src/solana-realtime.mjs",
     "replay:robinhood": "node src/replay-robinhood.mjs",
     "benchmark": "node src/benchmark-providers.mjs",
