@@ -1,0 +1,29 @@
+name: Authorize deploy key on droplet
+
+on:
+  workflow_dispatch:
+    inputs:
+      public_key:
+        description: ssh-ed25519 public key to append to root's authorized_keys
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  authorize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Append key
+        env:
+          PUBLIC_KEY: ${{ inputs.public_key }}
+        run: |
+          set -euo pipefail
+          case "$PUBLIC_KEY" in ssh-ed25519\ *) ;; *) echo "not an ed25519 public key"; exit 1;; esac
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.DO_SSH_PRIVATE_KEY }}" > ~/.ssh/stock_pair_do
+          chmod 600 ~/.ssh/stock_pair_do
+          ssh-keyscan -H "${{ secrets.DO_HOST }}" >> ~/.ssh/known_hosts
+          printf '%s\n' "$PUBLIC_KEY" | ssh -i ~/.ssh/stock_pair_do -o IdentitiesOnly=yes "root@${{ secrets.DO_HOST }}" 'install -m 700 -d /root/.ssh && cat >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && echo "authorized keys now: $(wc -l < /root/.ssh/authorized_keys)"'
